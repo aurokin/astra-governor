@@ -396,24 +396,27 @@ func (g *governor) apply() {
 	}
 }
 
-// leaveGame hands the floors and IFAS parameters back. The GPU floor goes back
-// to the vendor's base level, which is where every mode except Diablo keeps it.
-// (The level found on entry is not trustworthy: after a visit to Diablo the
-// vendor itself leaves the floor raised until the next mode change.) Diablo
-// pins the floor to the ceiling, so there it is left alone; the first daemon
-// could undo that pin when its own floor happened to sit on the same level.
+// leaveGame hands the floors and IFAS parameters back. Each floor goes back to
+// where every mode except Diablo keeps it: the bottom of each cluster's table
+// and the GPU's base level. (The levels found on entry are not trustworthy:
+// after a visit to Diablo the vendor itself leaves the GPU floor raised until
+// the next mode change.) Diablo pins every floor to its ceiling, and switching
+// to it is one way a game scene ends, so in Diablo nothing is restored. The
+// floors are not compared with what we wrote first: a thermal limit can make
+// them read back lower, and a floor skipped for that reason would stay raised.
 func (g *governor) leaveGame() {
 	if !g.game {
 		return
 	}
 	g.game = false
 	g.leftAt = time.Now()
-	// Stock leaves each cluster's minimum at the bottom of its table.
-	for _, p := range policies {
-		write(cpufreq+p+"/scaling_min_freq", strconv.Itoa(g.cpuFreqs[p][0]))
-	}
-	if !diablo() && readInt(kgsl+"min_pwrlevel") == g.gpuLevel(g.c.gpu) {
-		write(kgsl+"min_pwrlevel", strconv.Itoa(g.baseLevel()))
+	if !diablo() {
+		for _, p := range policies {
+			write(cpufreq+p+"/scaling_min_freq", strconv.Itoa(g.cpuFreqs[p][0]))
+		}
+		if readInt(kgsl+"min_pwrlevel") < g.baseLevel() {
+			write(kgsl+"min_pwrlevel", strconv.Itoa(g.baseLevel()))
+		}
 	}
 	for k, v := range g.stock {
 		if read(ifasParams+k) != v {
@@ -423,20 +426,47 @@ func (g *governor) leaveGame() {
 	g.c.reset()
 }
 
+// reclaim undoes floors a previous instance left behind if it was killed
+// before it could restore them. Outside Diablo, which pins both, nothing else
+// on this tablet raises a cluster's minimum or keeps the GPU floor above the
+// base level, so anything found raised at start-up is ours. A game in front
+// gets its floors back on the first tick.
+func (g *governor) reclaim() {
+	if diablo() {
+		return
+	}
+	for _, p := range policies {
+		if bottom := g.cpuFreqs[p][0]; readInt(cpufreq+p+"/scaling_min_freq") > bottom {
+			log.Printf("%s minimum was left raised; restoring", p)
+			write(cpufreq+p+"/scaling_min_freq", strconv.Itoa(bottom))
+		}
+	}
+	if readInt(kgsl+"min_pwrlevel") < g.baseLevel() {
+		log.Printf("GPU floor was left raised; restoring")
+		write(kgsl+"min_pwrlevel", strconv.Itoa(g.baseLevel()))
+	}
+}
+
 func diablo() bool {
 	return strings.TrimSpace(run(2*time.Second, "/system/bin/settings", "get", "global", "performance_mode_value")) == "4"
 }
 
-// repin covers the one ordering leaveGame cannot see: the vendor pins the GPU
-// for Diablo and reports the mode only afterwards, so our restore lands on top
-// of the pin. For a few seconds after leaving, put a lost pin back.
+// repin covers the one ordering leaveGame cannot see: the vendor pins the
+// clocks for Diablo and reports the mode only afterwards, so our restore lands
+// on top of the pins. For a few seconds after leaving, put lost pins back.
 func (g *governor) repin() {
-	if g.leftAt.IsZero() || time.Since(g.leftAt) > 5*time.Second {
+	if g.leftAt.IsZero() || time.Since(g.leftAt) > 5*time.Second || !diablo() {
 		return
 	}
-	if lo, hi := readInt(kgsl+"min_pwrlevel"), readInt(kgsl+"max_pwrlevel"); lo != hi && diablo() {
+	if lo, hi := readInt(kgsl+"min_pwrlevel"), readInt(kgsl+"max_pwrlevel"); lo != hi {
 		write(kgsl+"min_pwrlevel", strconv.Itoa(hi))
 		log.Printf("put the Diablo GPU pin back (level %d)", hi)
+	}
+	for _, p := range policies {
+		if top := g.cpuFreqs[p][len(g.cpuFreqs[p])-1]; readInt(cpufreq+p+"/scaling_min_freq") < min(top, readInt(cpufreq+p+"/scaling_max_freq")) {
+			write(cpufreq+p+"/scaling_min_freq", strconv.Itoa(top))
+			log.Printf("put the Diablo %s pin back", p)
+		}
 	}
 }
 
@@ -652,6 +682,8 @@ func main() {
 			g.stock[k] = v
 		}
 	}
+
+	g.reclaim()
 
 	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
