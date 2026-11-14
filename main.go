@@ -199,6 +199,17 @@ func (f *frames) rate(window time.Duration) (fps float64, n int) {
 	return fps, n
 }
 
+// longer counts the frames within the last `window` that followed the one
+// before by more than `ns`.
+func (f *frames) longer(window time.Duration, ns float64) (n int) {
+	for i := len(f.presents) - 1; i > 0 && f.presents[i] >= f.presents[len(f.presents)-1]-window.Nanoseconds(); i-- {
+		if float64(f.presents[i]-f.presents[i-1]) > ns {
+			n++
+		}
+	}
+	return n
+}
+
 // residency returns the average MHz over the time between two cumulative
 // `MHz-or-kHz ticks` tables, which is exact where sampling the current
 // frequency twice a second would not be.
@@ -307,6 +318,14 @@ type status struct {
 	HotThread string  `json:"hot_thread"`
 	HotBusy   float64 `json:"hot_busy"`
 	HotCPU    int     `json:"hot_cpu"`
+	// Read by the on-screen readout app, which predates this daemon.
+	Package    string  `json:"package"`
+	LongFrames int     `json:"long_frames"` // frames in the last second shown later than the target rate allows
+	CPUCur     [2]int  `json:"cpu_cur_mhz"` // average clock of each cluster over the last tick
+	CPUCap     [2]int  `json:"cpu_cap_mhz"` // the vendor's current ceiling for each cluster
+	LoadSum    float64 `json:"load_sum"`
+	SkinC      float64 `json:"skin_c"`
+	BattC      float64 `json:"batt_c"`
 }
 
 type governor struct {
@@ -500,8 +519,9 @@ func (g *governor) step() {
 	}
 	gpuCur := gpuResidency(g.gpuMHz)
 	cpuNow, gpuNow := 0, 0
-	if g.cpuPrev != nil {
-		cpuNow, gpuNow = meanMHz(g.cpuPrev[policy], cpuCur[policy]), meanMHz(g.gpuPrev, gpuCur)
+	prev := g.cpuPrev
+	if prev != nil {
+		cpuNow, gpuNow = meanMHz(prev[policy], cpuCur[policy]), meanMHz(g.gpuPrev, gpuCur)
 	}
 	g.cpuPrev, g.gpuPrev = cpuCur, gpuCur
 	gpuBusy := g.busySum / float64(max(g.busyN, 1))
@@ -528,13 +548,73 @@ func (g *governor) step() {
 	st.CPULimit, st.GPULimit = g.c.cpuMHz[cpuLimit], g.c.gpuMHz[gpuLimit]
 	st.CPUNow, st.GPUNow, st.GPUBusy = cpuNow, gpuNow, gpuBusy
 	st.HotThread, st.HotBusy, st.HotCPU = hotName, hotBusy, hotCPU
+	st.Package, st.LoadSum = g.pkg, hotBusy+gpuBusy
+	if g.c.target > 0 {
+		st.LongFrames = g.f.longer(time.Second, 1.5e9/g.c.target)
+	}
+	for i, p := range policies {
+		st.CPUCap[i] = readInt(cpufreq+p+"/scaling_max_freq") / 1000
+		if prev != nil {
+			st.CPUCur[i] = meanMHz(prev[p], cpuCur[p])
+		}
+	}
+	st.SkinC, st.BattC = float64(readInt(skinZone()))/1000, float64(readInt("/sys/class/power_supply/battery/temp"))/10
 	g.st = st
+}
+
+var skinPath string
+
+// skinZone finds the thermal zone the vendor's own throttling watches.
+func skinZone() string {
+	if skinPath == "" {
+		skinPath = "/dev/null"
+		zones, _ := filepath.Glob("/sys/class/thermal/thermal_zone*/type")
+		for _, z := range zones {
+			if read(z) == "skin-msm-therm" {
+				skinPath = filepath.Join(filepath.Dir(z), "temp")
+			}
+		}
+	}
+	return skinPath
+}
+
+// logFile appends to a file and starts a new one when it reaches 2 MB, keeping
+// the previous one as path.1. The daemon runs for weeks and logs every decision.
+type logFile struct {
+	path string
+	f    *os.File
+	size int64
+}
+
+func (l *logFile) Write(b []byte) (int, error) {
+	if l.f != nil && l.size > 2<<20 {
+		l.f.Close()
+		l.f = nil
+		os.Rename(l.path, l.path+".1")
+	}
+	if l.f == nil {
+		f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return 0, err
+		}
+		l.f, l.size = f, 0
+		if info, err := f.Stat(); err == nil {
+			l.size = info.Size()
+		}
+	}
+	n, err := l.f.Write(b)
+	l.size += int64(n)
+	return n, err
 }
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:7879", "status/control HTTP address")
 	monitor := flag.Bool("monitor", false, "start with control disabled (observe only)")
+	logPath := flag.String("log", "", "write the log to this file, keeping one previous file, instead of stderr")
 	flag.Parse()
+	if *logPath != "" {
+		log.SetOutput(&logFile{path: *logPath})
+	}
 
 	g := &governor{enabled: !*monitor, stock: map[string]string{}, cpuFreqs: map[string][]int{}}
 	for _, f := range strings.Fields(read(kgsl + "gpu_available_frequencies")) {
