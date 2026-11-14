@@ -17,12 +17,17 @@ import (
 // clocks step by step while that rate holds. Anything it cannot explain sends
 // it back to ample clocks to look again.
 //
-// Ample clocks are also how it tells its own mistakes from the game's. Many
-// games drop a frame now and then whatever the clocks (God of War II about once
-// a minute, at full clocks too). Blaming the floors for those walks them up to
-// the ceiling within minutes. So a late frame at lowered floors is only held
-// against them if frames then stay on time at ample clocks; if late frames turn
-// up there as well, the game is uneven by itself and they are let pass.
+// Two things it has learned from real games since:
+//
+//   - Many games drop a frame now and then whatever the clocks (God of War II
+//     at the same moments of a scene on every run, in Diablo too). A late frame
+//     with both floors at the vendor's limits is therefore held against
+//     nothing; held against the floors, it blocks every setting at once.
+//   - Average busy shares do not show short bursts. The same game's bursts
+//     need its cores near their top clock although its busiest thread is busy
+//     a third of the time. The stock CPU governor does show them: it climbs
+//     for each burst, too late to save that frame. How high it climbs is
+//     taken as how high the floor has to be.
 type controller struct {
 	cpuMHz []int // CPU floor choices, ascending; index 0 is the lowest clock, i.e. no floor
 	gpuMHz []int // GPU floor choices, ascending; index 0 is the vendor's own floor
@@ -41,7 +46,7 @@ type controller struct {
 	lastDownTo [2]int
 	undo       [2]int
 	holdUntil  map[[2]int]time.Time   // do not step down to these floors before then
-	failed     map[[2]int][]time.Time // when each setting was blamed, within maxMemory
+	failed     map[[2]int][]time.Time // when each setting failed, within maxMemory
 	nextProbe  time.Time
 	probeEvery time.Duration
 	busyRef    float64 // CPU plus GPU busy share when the current floors were settled on
@@ -52,20 +57,12 @@ type controller struct {
 	lockAtProbe   int       // the hold count the frames were locked to when the probe began
 	lateSince     time.Time // start of the 6 s window used for mild sustained lateness
 	rough         bool      // the target is still a one-second count, to be replaced by a six-second one
-
-	// Telling the game's own late frames from ours. A late frame stays inside the
-	// one-second rate for two more ticks, so those are judged on the newest frames
-	// alone. Late episodes and the time they were counted over are kept for
-	// lowered floors and for ample clocks, fading over about ten minutes.
-	deaf        int       // ticks for which the one-second rate still holds a late frame already dealt with
-	lateRun     int       // consecutive ticks whose newest frames were late
-	lastLow     time.Time // the last late episode at lowered floors
-	trackSince  time.Time
-	lowT, lowN  float64 // seconds and late episodes at lowered floors, since the last setting was blamed
-	ampT, ampN  float64 // the same at ample clocks
-	quick       bool    // this watch follows lateness that persisted, so two seconds on time settle it
-	watchSince  time.Time
-	trialFailed time.Time // the last trial step that was undone
+	// A late frame stays inside the one-second rate for two more ticks. Those are
+	// judged on the newest frames alone, so one late frame is one event.
+	deaf    int
+	lateRun int       // consecutive ticks whose newest frames were late
+	rest    time.Time // after a rescue, stay at ample clocks until then
+	moved   time.Time // when the floors last changed
 
 	// Whether the busiest thread and the GPU take turns within a frame or work
 	// side by side decides how far the clocks can come down: taking turns, their
@@ -92,6 +89,7 @@ type controller struct {
 type work struct {
 	at       time.Time
 	cpu, gpu float64
+	demand   int // MHz the stock CPU governor was reaching above our floor, 0 if it stayed on it
 }
 
 type state int
@@ -101,10 +99,9 @@ const (
 	learn              // ample clocks, finding out what the content wants
 	track              // holding the target with as little as possible
 	probe              // a brief look at ample clocks to see if the content wants more
-	watch              // ample clocks after late frames at lowered floors, to see whose fault they were
 )
 
-func (s state) String() string { return [...]string{"idle", "learn", "track", "probe", "watch"}[s] }
+func (s state) String() string { return [...]string{"idle", "learn", "track", "probe"}[s] }
 
 // Tuning. A tick is half a second.
 const (
@@ -134,14 +131,9 @@ const (
 	lockedLong = 12 * time.Second
 	firstHold  = 30 * time.Second
 
-	deafTicks  = 2
-	shortNow   = 0.9             // frames missing from the newest 0.4 s that count as late again
-	rareGap    = 2 * time.Minute // an isolated late frame after this long at the same floors is let pass
-	watchMax   = 2 * time.Minute // longest look at ample clocks before the floors are blamed
-	quickWatch = 2 * time.Second
-	forget     = 10 * time.Minute // late episodes fade from the counts over about this long
-	unevenBy   = 2.5              // floors are cleared while they see no more than this many times the late frames ample clocks do
-	enough     = 3.0              // late episodes ample clocks would have shown by now at the floors' rate, before their absence counts
+	deafTicks = 2
+	shortNow  = 0.9             // frames missing from the newest 0.4 s that count as late again
+	restFor   = 5 * time.Second // at ample clocks after a rescue, so the heavy moment is seen before stepping down
 )
 
 // sample is one tick of measurements for the app in front.
@@ -155,7 +147,10 @@ type sample struct {
 	gpuBusy float64 // GPU busy share of wall time
 	hotBusy float64 // busy share of the app's busiest thread
 	cpuNow  int     // MHz the busiest thread's cores actually ran at
-	gpuNow  int     // MHz the GPU actually ran at
+	// MHz those cores reached or passed for a tenth of the last ten seconds, if
+	// that is above our floor; 0 if the stock governor stayed on the floor.
+	demand int
+	gpuNow int // MHz the GPU actually ran at
 	// Every recent frame held exactly lockK refreshes (0 if the holds are mixed),
 	// and has done for lockedFor.
 	lockK     int
@@ -176,12 +171,9 @@ func (c *controller) reset() {
 }
 
 func (c *controller) enter(s state, now time.Time) {
-	if s == track && c.state != probe { // a probe returns to floors that have already been held a while
-		c.trackSince = now
-	}
 	c.state, c.ticks, c.good, c.above = s, 0, 0, 0
 	c.lateSince = now
-	if s != probe && s != watch { // these return to the floors they left; anything else starts again from ample clocks
+	if s != probe { // a probe returns to the floors it left; anything else starts again from ample clocks
 		c.trial = false
 	}
 }
@@ -197,14 +189,15 @@ func (c *controller) blocked(to [2]int, now time.Time) bool {
 	return false
 }
 
-// heaviest returns the most a frame has cost within the controller's memory.
-func (c *controller) heaviest(now time.Time) (cpu, gpu float64) {
+// heaviest returns the most a frame has cost within the controller's memory,
+// and the highest clock the stock CPU governor reached for in that time.
+func (c *controller) heaviest(now time.Time) (cpu, gpu float64, demand int) {
 	for _, w := range c.recent {
 		if now.Sub(w.at) <= c.memory {
-			cpu, gpu = max(cpu, w.cpu), max(gpu, w.gpu)
+			cpu, gpu, demand = max(cpu, w.cpu), max(gpu, w.gpu), max(demand, w.demand)
 		}
 	}
-	return cpu, gpu
+	return cpu, gpu, demand
 }
 
 // fail records that a setting could not hold the target and leaves it alone
@@ -223,53 +216,30 @@ func (c *controller) fail(at [2]int, now time.Time) {
 // noTrials rules out steps past the take-turns limit for a while, longer each
 // time, so a steady game is not made late by the same experiment every ten minutes.
 func (c *controller) noTrials(now time.Time) {
-	c.turnsUntil = now.Add(c.turnsWait)
+	c.turnsUntil, c.trial = now.Add(c.turnsWait), false
 	c.turnsWait = min(c.turnsWait*2, turnsMax)
 }
 
-// uneven reports whether the late frames seen at lowered floors are explained
-// by the game itself: ample clocks have shown late frames too, at a rate not far
-// below the floors'.
-func (c *controller) uneven() bool {
-	return c.ampN >= 0.5 && c.lowT > 0 && c.ampN/c.ampT >= c.lowN/c.lowT/unevenBy
-}
-
-// note keeps what a frame cost at this on-time moment.
+// note keeps what a frame cost at this on-time moment. The GPU's busy figure
+// trails a change of floors by a second or so; paired with the new clock it
+// would describe a moment that never happened.
 func (c *controller) note(s sample) {
-	if s.fps > 0 && s.cpuNow > 0 && s.gpuNow > 0 {
-		c.recent = append(c.recent, work{s.now, s.hotBusy * float64(s.cpuNow) / s.fps, s.gpuBusy * float64(s.gpuNow) / s.fps})
+	if s.fps > 0 && s.cpuNow > 0 && s.gpuNow > 0 && s.now.Sub(c.moved) >= settleTicks*500*time.Millisecond {
+		c.recent = append(c.recent, work{s.now, s.hotBusy * float64(s.cpuNow) / s.fps, s.gpuBusy * float64(s.gpuNow) / s.fps, s.demand})
 		for s.now.Sub(c.recent[0].at) > maxMemory {
 			c.recent = c.recent[1:]
 		}
 	}
 }
 
-// resume goes back to tracking at the floors a watch left, which were not at fault.
-func (c *controller) resume(now time.Time) {
-	c.cpu, c.gpu = c.saved[0], c.saved[1]
-	c.state, c.ticks, c.good, c.above, c.fast = track, 0, 0, 0, false
-	c.trackSince = now
-}
-
-// blame holds the floors a watch left responsible and starts down again from ample clocks.
-func (c *controller) blame(now time.Time) {
-	c.fail(c.saved, now)
-	if c.trial {
-		// Floors reached by trials gave way at a heavier moment, which settles that
-		// this thread and the GPU take turns as surely as an undone trial does.
-		c.noTrials(now)
-	}
-	c.memory = min(c.memory*2, maxMemory)
-	c.lowT, c.lowN = 0, 0
-	c.enter(track, now)
-	c.fast = true
-}
-
 // step consumes one sample, updates the two floors and names what it did.
 func (c *controller) step(s sample) (action string) {
-	defer func() {
+	defer func(cpu, gpu int) {
 		c.cpu, c.gpu = min(c.cpu, s.cpuLimit), min(c.gpu, s.gpuLimit)
-	}()
+		if c.cpu != cpu || c.gpu != gpu {
+			c.moved = s.now
+		}
+	}(c.cpu, c.gpu)
 	if !s.flowing {
 		// A gap in the frames is not lateness once they resume: let it leave the rates first.
 		c.deaf, c.lateSince, c.lateRun = deafTicks, s.now, 0
@@ -325,19 +295,7 @@ func (c *controller) step(s sample) (action string) {
 		return action
 	}
 
-	// Tracking, or watching at ample clocks after late frames.
-	if c.state == watch {
-		c.cpu, c.gpu = s.cpuLimit, s.gpuLimit
-	}
-	ample := c.cpu >= s.cpuLimit && c.gpu >= s.gpuLimit
-	fade := 1 - 0.5/forget.Seconds()
-	c.lowT, c.lowN, c.ampT, c.ampN = c.lowT*fade, c.lowN*fade, c.ampT*fade, c.ampN*fade
-	if ample {
-		c.ampT += 0.5
-	} else {
-		c.lowT += 0.5
-	}
-
+	// Tracking.
 	if s.fps > c.target*(1+fasterBy) {
 		// Running faster than the target with clocks to spare: the content sped up
 		// (a 30 fps cutscene ended) and the clocks happened to be enough for it.
@@ -352,8 +310,7 @@ func (c *controller) step(s sample) (action string) {
 
 	// While a late frame already dealt with is still inside the one-second rate,
 	// only the newest frames can show that lateness goes on.
-	lateNowToo := (c.target-s.fpsNow)*0.4 >= shortNow
-	late := lateNowToo
+	late := (c.target-s.fpsNow)*0.4 >= shortNow
 	if c.deaf > 0 {
 		c.deaf--
 	} else {
@@ -364,93 +321,66 @@ func (c *controller) step(s sample) (action string) {
 		c.lateRun = 0
 	} else {
 		c.lateRun++
-		first := c.lateRun == 1
 		c.lateSince, c.deaf = s.now, deafTicks
 		c.good, c.fast = 0, false
 		switch {
-		case ample && c.lateRun >= 4:
-			// Late for two seconds running with nothing more to give: the content itself
-			// slowed down. Nothing is blamed; find out what it wants now.
-			c.cpu, c.gpu = s.cpuLimit, s.gpuLimit
-			c.enter(learn, s.now)
-			return "relearn"
-		case ample:
-			// A late frame at ample clocks is the game's own.
-			if first {
-				c.ampN++
+		case c.cpu >= s.cpuLimit && c.gpu >= s.gpuLimit:
+			if c.lateRun >= 4 {
+				// Late for two seconds running with nothing more to give: the content
+				// itself slowed down. Find out what it wants now.
+				c.enter(learn, s.now)
+				return "relearn"
 			}
-			if c.state == watch && c.uneven() {
-				c.resume(s.now)
-				return "uneven-back"
-			}
+			// A late frame with nothing more to give is the game's own.
 			return "uneven"
-		case first && s.now.Sub(c.lastDown) < 3*time.Second && c.lastDownTo == [2]int{c.cpu, c.gpu}:
+		case c.lateRun == 1 && s.now.Sub(c.lastDown) < 3*time.Second && c.lastDownTo == [2]int{c.cpu, c.gpu}:
 			// The step we just took was one too many. Undo it and leave that setting
 			// alone for a while, longer each time it fails.
 			c.fail(c.lastDownTo, s.now)
 			c.cpu, c.gpu = c.undo[0], c.undo[1]
 			if c.lastDownWas {
-				if c.ampN < 0.5 || s.now.Sub(c.trialFailed) < turnsFor {
-					// The trial found the edge, so this thread and the GPU take turns. Go
-					// back to where the trials began: the settings in between hold the
-					// target, but with nothing to spare. (In a game that drops frames by
-					// itself one failure is not enough: some of those land behind a step.)
-					c.noTrials(s.now)
-					c.trial = false
-					c.cpu, c.gpu = c.trialBase[0], c.trialBase[1]
-					return "undo-trial"
-				}
-				c.trialFailed = s.now
+				// The trial found the edge, so this thread and the GPU take turns. Go
+				// back to where the trials began: the settings in between hold the
+				// target, but with nothing to spare.
+				c.noTrials(s.now)
+				c.cpu, c.gpu = c.trialBase[0], c.trialBase[1]
+				return "undo-trial"
 			}
 			return "undo-late"
-		case first && (s.now.Sub(maxTime(c.lastLow, c.lastDown, c.trackSince)) >= rareGap || c.uneven()):
-			// An isolated late frame after a long quiet spell, or in a game known to
-			// have them: let it pass. If it turns out not to be isolated, the next
-			// tick comes back here with lateRun at two.
-			c.lowN++
-			c.lastLow = s.now
-			return "uneven"
-		default:
-			// Late for a reason we did not cause by a step: the scene got heavier, the
-			// content changed rate, or the game dropped a frame by itself. Ample clocks
-			// answer the first at once, and what happens there tells the three apart.
-			if first {
-				c.lowN++
-			}
-			c.lastLow = s.now
-			c.saved, c.quick, c.watchSince = [2]int{c.cpu, c.gpu}, !first, s.now
-			c.cpu, c.gpu = s.cpuLimit, s.gpuLimit
-			c.state, c.ticks, c.above = watch, 0, 0
-			return "rescue-late"
 		}
-	}
-
-	c.note(s)
-	if c.state == watch {
-		held := s.now.Sub(c.watchSince)
-		expected := 0.0
-		if c.lowT > 0 {
-			expected = c.ampT * c.lowN / c.lowT
+		// Late for a reason we did not cause by a step: the scene got heavier, or the
+		// content changed rate. Ample clocks answer the first at once, and these
+		// floors have shown they cannot carry this game through its heavier moments.
+		// (If it is the second, frames stay late at ample clocks and the case above
+		// learns the new rate.)
+		c.fail([2]int{c.cpu, c.gpu}, s.now)
+		if c.trial {
+			// Floors reached by trials gave way, which settles that this thread and
+			// the GPU take turns as surely as an undone trial does.
+			c.noTrials(s.now)
 		}
-		switch {
-		case c.quick && held >= quickWatch, expected >= enough && !c.uneven():
-			c.blame(s.now)
-			return "blame"
-		case held >= watchMax:
-			if c.uneven() {
-				c.resume(s.now)
-				return "uneven-back"
-			}
-			c.blame(s.now)
-			return "blame"
-		}
-		return "watching"
+		c.memory = min(c.memory*2, maxMemory)
+		c.cpu, c.gpu = s.cpuLimit, s.gpuLimit
+		c.trial, c.fast, c.rest = false, true, s.now.Add(restFor)
+		return "rescue-late"
 	}
 
 	c.good++
 	if c.rough && s.now.Sub(c.lateSince) >= 6*time.Second {
 		// Six seconds on time since the target was set: all of them were at this rate.
 		c.target, c.rough = s.fps6, false
+	}
+	c.note(s)
+	if s.demand > c.cpuMHz[c.cpu] && c.cpu < s.cpuLimit {
+		// The stock governor keeps climbing past our floor: bursts we would otherwise
+		// meet a frame late. Go where it goes, and wait longer before trying lower.
+		for c.cpu < s.cpuLimit && c.cpuMHz[c.cpu] < s.demand {
+			c.cpu++
+		}
+		c.recent = append(c.recent, work{at: s.now, demand: s.demand})
+		c.memory = min(c.memory*2, maxMemory)
+		c.good = 0
+		return fmt.Sprintf("up-cpu%d", c.cpuMHz[c.cpu])
 	}
 	// A scene that changes while it is being held on a clean lower rate gives no
 	// lateness to notice, but its busy share moves. Treat that as a reason to look.
@@ -491,7 +421,7 @@ func (c *controller) step(s sample) (action string) {
 	if c.fast {
 		need = fastDownTicks
 	}
-	if c.good < need {
+	if c.good < need || s.now.Before(c.rest) {
 		return ""
 	}
 
@@ -504,12 +434,12 @@ func (c *controller) step(s sample) (action string) {
 		hot, gpu float64
 		name     string
 	}
-	cpuWork, gpuWork := c.heaviest(s.now)
+	cpuWork, gpuWork, demand := c.heaviest(s.now)
 	share := func(to [2]int) (hot, gpu float64) {
 		return cpuWork * c.target / float64(c.cpuMHz[to[0]]), gpuWork * c.target / float64(c.gpuMHz[to[1]])
 	}
 	var cands []cand
-	if c.cpu > 0 {
+	if c.cpu > 0 && c.cpuMHz[c.cpu-1] >= demand {
 		to := [2]int{c.cpu - 1, c.gpu}
 		hot, gpu := share(to)
 		cands = append(cands, cand{to, hot, gpu, fmt.Sprintf("cpu%d", c.cpuMHz[to[0]])})
@@ -551,13 +481,4 @@ func (c *controller) step(s sample) (action string) {
 		return "try-" + cands[best].name
 	}
 	return "down-" + cands[best].name
-}
-
-func maxTime(ts ...time.Time) (latest time.Time) {
-	for _, t := range ts {
-		if t.After(latest) {
-			latest = t
-		}
-	}
-	return latest
 }

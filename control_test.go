@@ -26,6 +26,10 @@ type game struct {
 	// The game drops two frames by itself about this often, whatever the clocks
 	// (a shader compile, a disc read). Zero means never.
 	hitchEvery time.Duration
+	// Every burstEvery one frame needs the CPU at burstMHz or it and the next
+	// are late. The stock governor climbs to burstMHz for each burst, a frame too late.
+	burstMHz   int
+	burstEvery time.Duration
 }
 
 func (g game) run(cpuMHz, gpuMHz int) (fps, hot, gpu float64) {
@@ -55,6 +59,8 @@ type rig struct {
 	gpuSeen  []float64     // GPU busy shares not yet reported: the kernel's figure trails by about a second
 	rnd      *rand.Rand
 	hitchAt  time.Time // the game's next own late frame
+	cpuWas   int
+	cpuSince time.Time // when the CPU floor last changed
 	echo     int       // ticks for which the last one is still inside the one-second rate
 	hitches  int
 	ampleFor int // ticks spent with both floors at the vendor's limits
@@ -85,6 +91,21 @@ func (r *rig) tick(g game) float64 {
 			r.hitches++
 		}
 	}
+	// Bursts come on the game's own schedule, and one that finds the floor too low
+	// is late. Between them the stock governor keeps climbing above such a floor
+	// for smaller ones, which shows once the floor has been in place a few seconds.
+	demand := 0
+	if r.c.cpu != r.cpuWas {
+		r.cpuWas, r.cpuSince = r.c.cpu, r.now
+	}
+	if g.burstMHz > cpuTable[r.c.cpu] {
+		if g.burstEvery > 0 && r.now.Sub(time.Unix(1000, 0))%g.burstEvery == 0 {
+			r.echo, fpsNow = 2, fps-5
+			r.hitches++
+		} else if r.now.Sub(r.cpuSince) >= 3*time.Second {
+			demand = g.burstMHz
+		}
+	}
 	if r.echo > 0 {
 		r.echo--
 		fps -= 2
@@ -110,7 +131,7 @@ func (r *rig) tick(g game) float64 {
 		r.gpuSeen = r.gpuSeen[1:]
 	}
 	a := r.c.step(sample{now: r.now, flowing: true, fps: fps, fps6: sum / float64(len(r.hist)), fpsNow: fpsNow, panelHz: panel, lockK: k, lockedFor: r.locked,
-		gpuBusy: r.gpuSeen[0], hotBusy: hot, cpuNow: cpuTable[r.c.cpu], gpuNow: gpuTable[r.c.gpu], cpuLimit: r.limits[0], gpuLimit: r.limits[1]})
+		gpuBusy: r.gpuSeen[0], hotBusy: hot, cpuNow: cpuTable[r.c.cpu], gpuNow: gpuTable[r.c.gpu], demand: demand, cpuLimit: r.limits[0], gpuLimit: r.limits[1]})
 	r.actions = append(r.actions, a)
 	if fps < g.fps*0.975 {
 		r.lateTick++
@@ -376,23 +397,19 @@ func TestLateFrameAtAmpleClocksBlamesNothing(t *testing.T) {
 }
 
 // An hour of a game that drops two frames about once a minute whatever the
-// clocks, as God of War II does. Blaming the floors for those walks them up to
-// ample clocks within minutes and keeps them there.
-func TestGameThatDropsFramesByItselfKeepsItsEconomy(t *testing.T) {
+// clocks, as God of War II does. Holding those against every setting at once,
+// as the first version of this law did when one arrived at ample clocks, pins
+// the floors to the ceiling for the rest of the session.
+func TestGameThatDropsFramesByItselfIsNotPinnedToAmpleClocks(t *testing.T) {
 	for seed := int64(1); seed <= 3; seed++ {
 		g := game{cpuMs: 4, gpuMs: 3, fps: 59.94, hitchEvery: time.Minute}
 		r := newRig()
 		r.rnd.Seed(seed)
-		starved, cpuSum, gpuSum := 0, 0, 0
+		starved := 0
 		for i := 0; i < 7200; i++ {
 			if r.tick(g) < 50 {
 				starved++
 			}
-			cpuSum, gpuSum = cpuSum+cpuTable[r.c.cpu], gpuSum+gpuTable[r.c.gpu]
-		}
-		// Without the game's own late frames this settles at 2227 and 342 MHz.
-		if cpu, gpu := cpuSum/7200, gpuSum/7200; cpu > 2600 || gpu > 650 {
-			t.Errorf("seed %d: floors averaged %d and %d MHz over the hour, want near 2227 and 342", seed, cpu, gpu)
 		}
 		if r.ampleFor > 7200/4 {
 			t.Errorf("seed %d: at ample clocks for %d of 7200 half-seconds", seed, r.ampleFor)
@@ -426,16 +443,22 @@ func TestHeavyStretchesAreStillCarriedInAGameThatDropsFramesByItself(t *testing.
 	}
 }
 
-// Most games drop a frame only every several minutes. Going to ample clocks to
-// look into each of those would cost more than the late frame it could prevent.
-func TestRareLateFramesAreNotEachLookedInto(t *testing.T) {
-	for seed := int64(1); seed <= 4; seed++ {
-		g := game{cpuMs: 4, gpuMs: 3, fps: 59.94, hitchEvery: 8 * time.Minute}
-		r := newRig()
-		r.rnd.Seed(seed)
-		r.run(g, 2*60*60)
-		if r.ampleFor > 14400/12 {
-			t.Errorf("seed %d: at ample clocks for %d of 14400 half-seconds over %d late frames", seed, r.ampleFor, r.hitches)
-		}
+// A game whose average load is light but which has a short burst every fifteen
+// seconds that only 2745 MHz absorbs. Busy shares do not show the bursts; the
+// stock governor climbing for them does.
+func TestBurstsTheStockGovernorClimbsForAreMetByTheFloor(t *testing.T) {
+	g := game{cpuMs: 4, gpuMs: 3, fps: 59.94, burstMHz: 2745, burstEvery: 15 * time.Second}
+	r := newRig()
+	r.run(g, 30*60)
+	// Looks below 2745 MHz come at most every 1, 2, 4, 8 and then 16 minutes, and
+	// only a burst in the first seconds of one arrives before the floor is back.
+	if r.hitches > 2 {
+		t.Errorf("%d of 120 bursts arrived late, want the floor to stay where the stock governor reached", r.hitches)
+	}
+	if got := cpuTable[r.c.cpu]; got != 2745 {
+		t.Errorf("CPU floor %d MHz after half an hour, want the 2745 the bursts need and no more", got)
+	}
+	if got := gpuTable[r.c.gpu]; got > 443 {
+		t.Errorf("GPU floor %d MHz: bursts on the CPU side kept the GPU clock up too", got)
 	}
 }

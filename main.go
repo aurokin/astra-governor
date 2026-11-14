@@ -8,9 +8,12 @@
 //     instead of starting low and reacting to late frames.
 //   - It sees every presented frame (SurfaceFlinger's per-layer history, twice
 //     a second) instead of a once-a-second histogram.
-//   - Its CPU knob is a frequency floor on both clusters instead of the WALT
-//     boost, so the CPU and GPU knobs are the same kind of thing and a step
-//     down can be predicted for either.
+//   - Its CPU knob is a frequency floor instead of the WALT boost, so the CPU
+//     and GPU knobs are the same kind of thing and a step down can be predicted
+//     for either. The control law's floor goes to the cluster the game's
+//     busiest thread runs on; the other cluster gets only what its own busiest
+//     game thread needs for the same headroom, so six idle cores are not held
+//     at a high clock because two busy ones need it.
 //
 // Everything it writes is runtime sysfs state that disappears on reboot.
 // Thermal limits are untouched: a floor never goes above the vendor's cap.
@@ -320,9 +323,11 @@ type status struct {
 	HotCPU    int     `json:"hot_cpu"`
 	// Read by the on-screen readout app, which predates this daemon.
 	Package    string  `json:"package"`
-	LongFrames int     `json:"long_frames"` // frames in the last second shown later than the target rate allows
-	CPUCur     [2]int  `json:"cpu_cur_mhz"` // average clock of each cluster over the last tick
-	CPUCap     [2]int  `json:"cpu_cap_mhz"` // the vendor's current ceiling for each cluster
+	LongFrames int     `json:"long_frames"`    // frames in the last second shown later than the target rate allows
+	CPUCur     [2]int  `json:"cpu_cur_mhz"`    // average clock of each cluster over the last tick
+	CPUCap     [2]int  `json:"cpu_cap_mhz"`    // the vendor's current ceiling for each cluster
+	CPUFloors  [2]int  `json:"cpu_floors_mhz"` // the floor each cluster holds
+	Demand     int     `json:"demand_mhz"`     // where the stock governor reaches above the busiest cluster's floor, 0 if nowhere
 	LoadSum    float64 `json:"load_sum"`
 	SkinC      float64 `json:"skin_c"`
 	BattC      float64 `json:"batt_c"`
@@ -348,7 +353,13 @@ type governor struct {
 	gpuPrev table
 	busySum float64
 	busyN   int
-	leftAt  time.Time // when the last game scene ended
+	leftAt  time.Time          // when the last game scene ended
+	hot     string             // the cluster the game's busiest thread runs on
+	hotFor  int                // ticks in a row the busiest thread was seen on the other one
+	floor   map[string]int     // the floor each cluster currently holds, kHz
+	since   map[string][]table // each cluster's clock residency per tick since its floor last changed, newest last
+	side    []float64          // recent ratios of the other cluster's heaviest game thread to the busiest one, as work
+	hold    []int              // for experiments: floors in MHz (prime cores, GPU, other cores) to hold in games instead of running the control law
 }
 
 // gpuIndexToLevel maps the controller's ascending GPU table onto KGSL levels:
@@ -390,10 +401,59 @@ func (g *governor) apply() {
 	}
 	for _, p := range policies {
 		khz := g.cpuFloorKHz(p, g.c.cpuMHz[g.c.cpu])
+		switch {
+		case g.hold != nil:
+			khz = g.cpuFloorKHz(p, g.hold[map[string]int{"policy6": 0, "policy0": 2}[p]])
+		case p != g.hot:
+			khz = g.sideFloor(p, g.c.cpuMHz[g.c.cpu])
+		}
+		if khz != g.floor[p] {
+			g.floor[p], g.since[p] = khz, nil
+		}
 		if readInt(cpufreq+p+"/scaling_min_freq") != khz {
 			write(cpufreq+p+"/scaling_min_freq", strconv.Itoa(khz))
 		}
 	}
+}
+
+// reached returns the clock a cluster was at or above for a tenth of the time
+// since its floor last changed (at most the last ten seconds), in kHz, or 0
+// before three seconds of that have passed. The stock governor climbs for
+// every burst of work, a frame too late to help that one; where it climbs to
+// says what the cluster is being asked for.
+func (g *governor) reached(policy string) int {
+	ticks := g.since[policy]
+	if len(ticks) < 6 {
+		return 0
+	}
+	sum, total := table{}, 0
+	for _, t := range ticks {
+		for mhz, n := range t {
+			sum[mhz] += n
+			total += n
+		}
+	}
+	freqs := g.cpuFreqs[policy]
+	above := 0
+	for i := len(freqs) - 1; i >= 0; i-- {
+		if above += sum[freqs[i]/1000]; above*10 >= total && total > 0 {
+			return freqs[i]
+		}
+	}
+	return 0
+}
+
+// sideFloor is the floor for the cluster the busiest thread is not on, given
+// the floor of the one it is on: the clock at which that cluster's heaviest game
+// thread would be as busy as the busiest thread is at its floor. The ratio is
+// the largest of the last ten seconds, so a thread that comes and goes keeps
+// its clock.
+func (g *governor) sideFloor(policy string, hotMHz int) int {
+	ratio := 0.0
+	for _, r := range g.side {
+		ratio = max(ratio, r)
+	}
+	return g.cpuFloorKHz(policy, int(float64(hotMHz)*min(ratio, 1)))
 }
 
 // leaveGame hands the floors and IFAS parameters back. Each floor goes back to
@@ -475,11 +535,12 @@ func (g *governor) enterGame() {
 	g.c.reset()
 	g.f = frames{}
 	g.cpuPrev, g.gpuPrev, g.threads = nil, nil, nil
+	g.hot, g.hotFor, g.floor, g.since, g.side = policies[0], 0, map[string]int{}, map[string][]table{}, nil
 }
 
 // limits returns the highest floors the vendor currently allows, as controller indices.
 func (g *governor) limits() (cpu, gpu int) {
-	capMHz := readInt(cpufreq+"policy0/scaling_max_freq") / 1000
+	capMHz := readInt(cpufreq+g.hot+"/scaling_max_freq") / 1000
 	for i, f := range g.c.cpuMHz {
 		if f <= capMHz {
 			cpu = i
@@ -529,6 +590,7 @@ func (g *governor) step() {
 		g.pkg, g.pid, g.threads = m[1], pidOf(m[1]), nil
 	}
 	hotBusy, hotCPU, hotName := 0.0, 0, ""
+	var clusterBusy [2]float64 // the busiest game thread last seen on each cluster
 	if g.pid != 0 {
 		thr := threadsOf(g.pid)
 		if len(thr) == 0 {
@@ -536,7 +598,9 @@ func (g *governor) step() {
 		} else if dt := now.Sub(g.lastThr).Seconds(); g.threads != nil && dt > 0 {
 			for tid, t := range thr {
 				if p, ok := g.threads[tid]; ok {
-					if busy := float64(t.ticks-p.ticks) / 100 / dt; busy > hotBusy {
+					busy := float64(t.ticks-p.ticks) / 100 / dt
+					clusterBusy[min(t.cpu/6, 1)] = max(clusterBusy[min(t.cpu/6, 1)], busy)
+					if busy > hotBusy {
 						hotBusy, hotCPU, hotName = busy, t.cpu, t.name
 					}
 				}
@@ -544,10 +608,14 @@ func (g *governor) step() {
 		}
 		g.threads, g.lastThr = thr, now
 	}
-	policy := policies[0]
-	if hotCPU >= 6 {
-		policy = policies[1]
+	// Follow the busiest thread to its cluster once it has been there two ticks
+	// running; a thread caught mid-migration should not swap the floors over.
+	if seen := policies[min(hotCPU/6, 1)]; hotName == "" || seen == g.hot {
+		g.hotFor = 0
+	} else if g.hotFor++; g.hotFor >= 2 {
+		g.hot, g.hotFor = seen, 0
 	}
+	policy := g.hot
 	cpuCur := map[string]table{}
 	for _, p := range policies {
 		cpuCur[p] = cpuResidency(p)
@@ -557,6 +625,36 @@ func (g *governor) step() {
 	prev := g.cpuPrev
 	if prev != nil {
 		cpuNow, gpuNow = meanMHz(prev[policy], cpuCur[policy]), meanMHz(g.gpuPrev, gpuCur)
+		for _, p := range policies {
+			delta := table{}
+			for mhz, n := range cpuCur[p] {
+				if d := n - prev[p][mhz]; d > 0 {
+					delta[mhz] = d
+				}
+			}
+			if g.since[p] = append(g.since[p], delta); len(g.since[p]) > 20 {
+				g.since[p] = g.since[p][1:]
+			}
+		}
+	}
+	// The other cluster's share of the work, for its floor.
+	if prev != nil && hotBusy > 0.02 {
+		hot, other := 0, 1
+		if g.hot == policies[1] {
+			hot, other = 1, 0
+		}
+		ratio := 1.0
+		if clusterBusy[hot] > 0 {
+			ratio = clusterBusy[other] * float64(meanMHz(prev[policies[other]], cpuCur[policies[other]])) / (clusterBusy[hot] * float64(max(cpuNow, 1)))
+		}
+		if g.side = append(g.side, ratio); len(g.side) > 20 {
+			g.side = g.side[1:]
+		}
+	}
+	// What the busiest thread's cluster is being asked for, if that is more than our floor gives.
+	demand := 0
+	if r := g.reached(policy); r > g.floor[policy] {
+		demand = r / 1000
 	}
 	g.cpuPrev, g.gpuPrev = cpuCur, gpuCur
 	gpuBusy := g.busySum / float64(max(g.busyN, 1))
@@ -567,11 +665,26 @@ func (g *governor) step() {
 	if g.f.periodNs > 0 {
 		panelHz = 1e9 / g.f.periodNs
 	}
-	action := g.c.step(sample{now: now, flowing: flowing, fps: fps, fps6: fps6, fpsNow: fpsNow, panelHz: panelHz,
-		gpuBusy: gpuBusy, hotBusy: hotBusy, cpuNow: cpuNow, gpuNow: gpuNow,
-		lockK: g.f.curHold, lockedFor: lockedFor, cpuLimit: cpuLimit, gpuLimit: gpuLimit})
+	action := "hold"
+	if g.hold == nil {
+		action = g.c.step(sample{now: now, flowing: flowing, fps: fps, fps6: fps6, fpsNow: fpsNow, panelHz: panelHz,
+			gpuBusy: gpuBusy, hotBusy: hotBusy, cpuNow: cpuNow, gpuNow: gpuNow, demand: demand,
+			lockK: g.f.curHold, lockedFor: lockedFor, cpuLimit: cpuLimit, gpuLimit: gpuLimit})
+	} else {
+		g.c.cpu, g.c.gpu = 0, 0
+		for i, f := range g.c.cpuMHz[:cpuLimit+1] {
+			if f <= g.hold[0] {
+				g.c.cpu = i
+			}
+		}
+		for i, f := range g.c.gpuMHz[:gpuLimit+1] {
+			if f <= g.hold[1] {
+				g.c.gpu = i
+			}
+		}
+	}
 	g.apply()
-	if action != "" && action != "learning" && action != "probing" && action != "idle" {
+	if action != "" && action != "learning" && action != "probing" && action != "idle" && action != "watching" && action != "hold" {
 		log.Printf("%s: %.1f fps (target %.1f) cpu floor %d MHz gpu floor %d MHz, busy %.2f+%.2f at %d/%d MHz",
 			action, fps, g.c.target, g.c.cpuMHz[g.c.cpu], g.c.gpuMHz[g.c.gpu], hotBusy, gpuBusy, cpuNow, gpuNow)
 	}
@@ -583,12 +696,12 @@ func (g *governor) step() {
 	st.CPULimit, st.GPULimit = g.c.cpuMHz[cpuLimit], g.c.gpuMHz[gpuLimit]
 	st.CPUNow, st.GPUNow, st.GPUBusy = cpuNow, gpuNow, gpuBusy
 	st.HotThread, st.HotBusy, st.HotCPU = hotName, hotBusy, hotCPU
-	st.Package, st.LoadSum = g.pkg, hotBusy+gpuBusy
+	st.Package, st.LoadSum, st.Demand = g.pkg, hotBusy+gpuBusy, demand
 	if g.c.target > 0 {
 		st.LongFrames = g.f.longer(time.Second, 1.5e9/g.c.target)
 	}
 	for i, p := range policies {
-		st.CPUCap[i] = readInt(cpufreq+p+"/scaling_max_freq") / 1000
+		st.CPUCap[i], st.CPUFloors[i] = readInt(cpufreq+p+"/scaling_max_freq")/1000, g.floor[p]/1000
 		if prev != nil {
 			st.CPUCur[i] = meanMHz(prev[p], cpuCur[p])
 		}
@@ -645,12 +758,21 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:7879", "status/control HTTP address")
 	monitor := flag.Bool("monitor", false, "start with control disabled (observe only)")
 	logPath := flag.String("log", "", "write the log to this file, keeping one previous file, instead of stderr")
+	hold := flag.String("hold", "", "for experiments: hold these floors in games (\"cpuMHz,gpuMHz[,otherCoresMHz]\": the first is for the prime cores, and for the rest unless a third is given) instead of running the control law")
 	flag.Parse()
 	if *logPath != "" {
 		log.SetOutput(&logFile{path: *logPath})
 	}
 
 	g := &governor{enabled: !*monitor, stock: map[string]string{}, cpuFreqs: map[string][]int{}}
+	if *hold != "" {
+		g.hold = []int{0, 0, 0}
+		if n, _ := fmt.Sscanf(*hold, "%d,%d,%d", &g.hold[0], &g.hold[1], &g.hold[2]); n < 2 {
+			log.Fatalf("-hold %q: want cpuMHz,gpuMHz[,otherCoresMHz]", *hold)
+		} else if n == 2 {
+			g.hold[2] = g.hold[0]
+		}
+	}
 	for _, f := range strings.Fields(read(kgsl + "gpu_available_frequencies")) {
 		hz, _ := strconv.Atoi(f)
 		g.gpuMHz = append(g.gpuMHz, hz/1_000_000)
