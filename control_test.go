@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"math/rand"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,9 @@ type game struct {
 	cpuMs, gpuMs float64 // work per frame with both clocks at the top of their tables
 	fps          float64
 	sideBySide   bool // the CPU and GPU work overlap (a threaded renderer) instead of taking turns
+	// The game drops two frames by itself about this often, whatever the clocks
+	// (a shader compile, a disc read). Zero means never.
+	hitchEvery time.Duration
 }
 
 func (g game) run(cpuMHz, gpuMHz int) (fps, hot, gpu float64) {
@@ -49,16 +53,42 @@ type rig struct {
 	lateTick int
 	locked   time.Duration // how long the delivered rate has sat exactly on a fraction of the panel rate
 	gpuSeen  []float64     // GPU busy shares not yet reported: the kernel's figure trails by about a second
+	rnd      *rand.Rand
+	hitchAt  time.Time // the game's next own late frame
+	echo     int       // ticks for which the last one is still inside the one-second rate
+	hitches  int
+	ampleFor int // ticks spent with both floors at the vendor's limits
 }
 
 func newRig() *rig {
-	return &rig{c: newController(cpuTable, gpuTable), now: time.Unix(1000, 0), limits: [2]int{len(cpuTable) - 1, len(gpuTable) - 1}}
+	return &rig{c: newController(cpuTable, gpuTable), now: time.Unix(1000, 0), limits: [2]int{len(cpuTable) - 1, len(gpuTable) - 1},
+		rnd: rand.New(rand.NewSource(1))}
 }
 
 // tick advances half a second and returns the rate the game delivered.
 func (r *rig) tick(g game) float64 {
 	r.now = r.now.Add(500 * time.Millisecond)
 	fps, hot, gpu := g.run(cpuTable[r.c.cpu], gpuTable[r.c.gpu])
+	if r.c.cpu == r.limits[0] && r.c.gpu == r.limits[1] {
+		r.ampleFor++
+	}
+	// The game's own late frames arrive at random, like the real ones. Each shows
+	// in the newest frames for one tick and in the one-second rate for two.
+	fpsNow := fps
+	if g.hitchEvery > 0 {
+		if r.hitchAt.IsZero() {
+			r.hitchAt = r.now.Add(time.Duration(r.rnd.ExpFloat64() * float64(g.hitchEvery)))
+		}
+		if !r.now.Before(r.hitchAt) {
+			r.hitchAt = r.now.Add(time.Duration(r.rnd.ExpFloat64() * float64(g.hitchEvery)))
+			r.echo, fpsNow = 2, fps-5
+			r.hitches++
+		}
+	}
+	if r.echo > 0 {
+		r.echo--
+		fps -= 2
+	}
 	r.hist = append(r.hist, fps)
 	if len(r.hist) > 12 {
 		r.hist = r.hist[1:]
@@ -79,7 +109,7 @@ func (r *rig) tick(g game) float64 {
 	if len(r.gpuSeen) > 3 {
 		r.gpuSeen = r.gpuSeen[1:]
 	}
-	a := r.c.step(sample{now: r.now, flowing: true, fps: fps, fps6: sum / float64(len(r.hist)), panelHz: panel, lockK: k, lockedFor: r.locked,
+	a := r.c.step(sample{now: r.now, flowing: true, fps: fps, fps6: sum / float64(len(r.hist)), fpsNow: fpsNow, panelHz: panel, lockK: k, lockedFor: r.locked,
 		gpuBusy: r.gpuSeen[0], hotBusy: hot, cpuNow: cpuTable[r.c.cpu], gpuNow: gpuTable[r.c.gpu], cpuLimit: r.limits[0], gpuLimit: r.limits[1]})
 	r.actions = append(r.actions, a)
 	if fps < g.fps*0.975 {
@@ -212,7 +242,7 @@ func TestStepDownThatCausesLatenessIsUndoneAndLeftAlone(t *testing.T) {
 	feed := func(fps float64) string {
 		now = now.Add(500 * time.Millisecond)
 		// Busy shares low enough that every step down looks safe to the predictor.
-		return c.step(sample{now: now, flowing: true, fps: fps, fps6: fps, panelHz: panel, gpuBusy: 0.2, hotBusy: 0.2,
+		return c.step(sample{now: now, flowing: true, fps: fps, fps6: fps, fpsNow: fps, panelHz: panel, gpuBusy: 0.2, hotBusy: 0.2,
 			cpuNow: cpuTable[c.cpu], gpuNow: gpuTable[c.gpu], cpuLimit: limits[0], gpuLimit: limits[1]})
 	}
 	var a string
@@ -318,5 +348,94 @@ func TestFloorsThatFailWhenTheSceneGetsHeavyAreNotReturnedToAtOnce(t *testing.T)
 	// 22 heavy stretches. Returning to the same floors each time would mean a rescue for every one.
 	if n := r.count("rescue-late"); n > 2 {
 		t.Errorf("%d rescues in 15 minutes of a repeating heavy stretch, want the floors to learn from them", n)
+	}
+}
+
+func TestLateFrameAtAmpleClocksBlamesNothing(t *testing.T) {
+	c := newController(cpuTable, gpuTable)
+	now := time.Unix(1000, 0)
+	limits := [2]int{len(cpuTable) - 1, len(gpuTable) - 1}
+	feed := func(fps float64) string {
+		now = now.Add(500 * time.Millisecond)
+		// Busy shares too high for any step down, so the floors stay at the limits.
+		return c.step(sample{now: now, flowing: true, fps: fps, fps6: 59.94, fpsNow: fps, panelHz: panel, gpuBusy: 0.79, hotBusy: 0.79,
+			cpuNow: cpuTable[c.cpu], gpuNow: gpuTable[c.gpu], cpuLimit: limits[0], gpuLimit: limits[1]})
+	}
+	for i := 0; i < 30; i++ {
+		feed(59.94)
+	}
+	if got := feed(55); got != "uneven" {
+		t.Fatalf("action %q for a late frame with nothing more to give, want uneven", got)
+	}
+	if len(c.holdUntil) != 0 {
+		t.Errorf("settings held back after a late frame at ample clocks: %v", c.holdUntil)
+	}
+	if c.state != track || c.target < 59 {
+		t.Errorf("state %v target %.1f, want the target kept and tracking to go on", c.state, c.target)
+	}
+}
+
+// An hour of a game that drops two frames about once a minute whatever the
+// clocks, as God of War II does. Blaming the floors for those walks them up to
+// ample clocks within minutes and keeps them there.
+func TestGameThatDropsFramesByItselfKeepsItsEconomy(t *testing.T) {
+	for seed := int64(1); seed <= 3; seed++ {
+		g := game{cpuMs: 4, gpuMs: 3, fps: 59.94, hitchEvery: time.Minute}
+		r := newRig()
+		r.rnd.Seed(seed)
+		starved, cpuSum, gpuSum := 0, 0, 0
+		for i := 0; i < 7200; i++ {
+			if r.tick(g) < 50 {
+				starved++
+			}
+			cpuSum, gpuSum = cpuSum+cpuTable[r.c.cpu], gpuSum+gpuTable[r.c.gpu]
+		}
+		// Without the game's own late frames this settles at 2227 and 342 MHz.
+		if cpu, gpu := cpuSum/7200, gpuSum/7200; cpu > 2600 || gpu > 650 {
+			t.Errorf("seed %d: floors averaged %d and %d MHz over the hour, want near 2227 and 342", seed, cpu, gpu)
+		}
+		if r.ampleFor > 7200/4 {
+			t.Errorf("seed %d: at ample clocks for %d of 7200 half-seconds", seed, r.ampleFor)
+		}
+		if starved > 10 {
+			t.Errorf("seed %d: %d half-seconds starved by the floors", seed, starved)
+		}
+	}
+}
+
+func TestHeavyStretchesAreStillCarriedInAGameThatDropsFramesByItself(t *testing.T) {
+	// Ninety heavy stretches in the hour, each beyond what the floors for the rest can carry.
+	for seed := int64(1); seed <= 3; seed++ {
+		light := game{cpuMs: 4, gpuMs: 3, fps: 59.94, hitchEvery: time.Minute}
+		heavy := game{cpuMs: 7, gpuMs: 5, fps: 59.94, hitchEvery: time.Minute}
+		r := newRig()
+		r.rnd.Seed(seed)
+		starved := 0
+		for i := 0; i < 7200; i++ {
+			g := light
+			if i%80 >= 70 {
+				g = heavy
+			}
+			if r.tick(g) < 50 {
+				starved++
+			}
+		}
+		if starved > 12 {
+			t.Errorf("seed %d: %d half-seconds starved in an hour, want the floors to learn the heavy stretches", seed, starved)
+		}
+	}
+}
+
+// Most games drop a frame only every several minutes. Going to ample clocks to
+// look into each of those would cost more than the late frame it could prevent.
+func TestRareLateFramesAreNotEachLookedInto(t *testing.T) {
+	for seed := int64(1); seed <= 4; seed++ {
+		g := game{cpuMs: 4, gpuMs: 3, fps: 59.94, hitchEvery: 8 * time.Minute}
+		r := newRig()
+		r.rnd.Seed(seed)
+		r.run(g, 2*60*60)
+		if r.ampleFor > 14400/12 {
+			t.Errorf("seed %d: at ample clocks for %d of 14400 half-seconds over %d late frames", seed, r.ampleFor, r.hitches)
+		}
 	}
 }

@@ -512,6 +512,10 @@ func (g *governor) step() {
 
 	fps, n := g.f.rate(time.Second)
 	fps6, _ := g.f.rate(6 * time.Second)
+	fpsNow, nNow := g.f.rate(400 * time.Millisecond)
+	if nNow < 4 {
+		fpsNow = fps // too few frames to judge by themselves
+	}
 	age := time.Duration(0)
 	lockedFor := time.Duration(0)
 	if m := len(g.f.presents); m > 0 {
@@ -563,7 +567,7 @@ func (g *governor) step() {
 	if g.f.periodNs > 0 {
 		panelHz = 1e9 / g.f.periodNs
 	}
-	action := g.c.step(sample{now: now, flowing: flowing, fps: fps, fps6: fps6, panelHz: panelHz,
+	action := g.c.step(sample{now: now, flowing: flowing, fps: fps, fps6: fps6, fpsNow: fpsNow, panelHz: panelHz,
 		gpuBusy: gpuBusy, hotBusy: hotBusy, cpuNow: cpuNow, gpuNow: gpuNow,
 		lockK: g.f.curHold, lockedFor: lockedFor, cpuLimit: cpuLimit, gpuLimit: gpuLimit})
 	g.apply()
