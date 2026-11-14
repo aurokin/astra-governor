@@ -21,14 +21,19 @@ var (
 type game struct {
 	cpuMs, gpuMs float64 // work per frame with both clocks at the top of their tables
 	fps          float64
+	sideBySide   bool // the CPU and GPU work overlap (a threaded renderer) instead of taking turns
 }
 
 func (g game) run(cpuMHz, gpuMHz int) (fps, hot, gpu float64) {
 	ct := g.cpuMs * float64(cpuTable[len(cpuTable)-1]) / float64(cpuMHz)
 	gt := g.gpuMs * float64(gpuTable[len(gpuTable)-1]) / float64(gpuMHz)
 	fps = g.fps
-	if ct+gt > 1000/g.fps {
-		fps = panel / math.Ceil((ct+gt)*panel/1000)
+	frame := ct + gt
+	if g.sideBySide {
+		frame = math.Max(ct, gt)
+	}
+	if frame > 1000/g.fps {
+		fps = panel / math.Ceil(frame*panel/1000)
 	}
 	return fps, ct * fps / 1000, gt * fps / 1000
 }
@@ -254,5 +259,59 @@ func TestFloorsNeverExceedWhatTheVendorAllows(t *testing.T) {
 		if r.c.cpu > 3 || r.c.gpu > 4 {
 			t.Fatalf("floors %d/%d above the vendor's limits 3/4", r.c.cpu, r.c.gpu)
 		}
+	}
+}
+
+func TestSideBySideLoadIsEconomisedPastTheTakeTurnsLimit(t *testing.T) {
+	// Busy shares of 0.42 and 0.48 at ample clocks: taking turns that would leave
+	// no room, but these overlap, so each can grow towards a whole frame.
+	g := game{cpuMs: 7, gpuMs: 8, fps: 59.94, sideBySide: true}
+	r := newRig()
+	r.run(g, 3)
+	r.lateTick = 0
+	r.run(g, 300)
+	_, hot, gpu := g.run(cpuTable[r.c.cpu], gpuTable[r.c.gpu])
+	if hot+gpu < 1.2 {
+		t.Errorf("settled at busy shares %.2f+%.2f; clocks were not lowered past the take-turns limit", hot, gpu)
+	}
+	if hot >= 1 || gpu >= 1 {
+		t.Errorf("settled at busy shares %.2f+%.2f, which cannot hold the rate", hot, gpu)
+	}
+	if r.lateTick != 0 {
+		t.Errorf("%d late half-seconds on the way down, want none", r.lateTick)
+	}
+}
+
+func TestTakingTurnsLoadPaysForOneTrialAndKeepsItsMargin(t *testing.T) {
+	g := game{cpuMs: 6, gpuMs: 4, fps: 59.94}
+	r := newRig()
+	r.run(g, 3)
+	r.lateTick = 0
+	r.run(g, 300)
+	if n := r.count("undo-trial"); n != 1 {
+		t.Fatalf("%d failed trials in five minutes, want exactly one", n)
+	}
+	if r.lateTick > 1 {
+		t.Errorf("%d late half-seconds, want only the failed trial's", r.lateTick)
+	}
+	if _, hot, gpu := g.run(cpuTable[r.c.cpu], gpuTable[r.c.gpu]); hot+gpu >= slack {
+		t.Errorf("settled at busy shares %.2f+%.2f, inside the margin a take-turns load should keep", hot, gpu)
+	}
+}
+
+func TestFloorsThatFailWhenTheSceneGetsHeavyAreNotReturnedToAtOnce(t *testing.T) {
+	// Every 40 s this game has a 5 s heavy stretch that the economised floors cannot carry.
+	light, heavy := game{cpuMs: 4, gpuMs: 3, fps: 59.94}, game{cpuMs: 7, gpuMs: 5, fps: 59.94}
+	r := newRig()
+	for i := 0; i < 15*60*2; i++ {
+		if i%80 >= 70 {
+			r.tick(heavy)
+		} else {
+			r.tick(light)
+		}
+	}
+	// 22 heavy stretches. Returning to the same floors each time would mean a rescue for every one.
+	if n := r.count("rescue-late"); n > 2 {
+		t.Errorf("%d rescues in 15 minutes of a repeating heavy stretch, want the floors to learn from them", n)
 	}
 }

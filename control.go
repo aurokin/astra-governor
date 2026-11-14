@@ -44,6 +44,31 @@ type controller struct {
 	confirmedLock int
 	lockAtProbe   int       // the hold count the frames were locked to when the probe began
 	lateSince     time.Time // start of the 6 s window used for mild sustained lateness
+
+	// Whether the busiest thread and the GPU take turns within a frame or work
+	// side by side decides how far the clocks can come down: taking turns, their
+	// busy shares must fit into one frame together; side by side, each has a whole
+	// frame. Busy shares that add up to more than a frame prove the second case.
+	// Until then a step past the take-turns limit is a trial, and a failed trial
+	// settles the first case for a while.
+	sideBySide  bool
+	over        int       // consecutive on-time ticks with the busy shares adding up past a frame
+	turnsUntil  time.Time // a trial failed: assume taking turns until then
+	trial       bool      // floors are below trialBase on the strength of trials
+	trialBase   [2]int    // floors before the first trial step
+	lastDownWas bool      // the last step down was a trial
+
+	// Steps down are judged against the heaviest recent moment, not the current
+	// one, so a scene that is heavy now and then keeps the clocks it needs then.
+	recent []work
+	memory time.Duration // how far back "recent" reaches; doubles each time a heavy moment catches the floors out
+}
+
+// work is what one frame cost at one on-time moment, as busy share times clock
+// (MHz) per frame per second, so it can be scaled to any clock and frame rate.
+type work struct {
+	at       time.Time
+	cpu, gpu float64
 }
 
 type state int
@@ -66,7 +91,11 @@ const (
 	slowDownTicks = 20    // on-time ticks before a careful step down
 	fastDownTicks = 2     // the same while descending after a look at ample clocks
 	slack         = 0.80  // a step down must leave the predicted busy share below this
-	overlap       = 1.30  // CPU and GPU busy shares adding up past this run side by side, not in turn
+	overlap       = 1.10  // CPU and GPU busy shares adding up past this cannot be taking turns
+	overlapTicks  = 3
+	turnsFor      = 10 * time.Minute
+	firstMemory   = time.Minute
+	maxMemory     = 16 * time.Minute
 	idleTicks     = 10
 	firstProbe    = 20 * time.Second
 	maxProbe      = 120 * time.Second
@@ -106,12 +135,43 @@ func newController(cpuMHz, gpuMHz []int) *controller {
 
 func (c *controller) reset() {
 	*c = controller{cpuMHz: c.cpuMHz, gpuMHz: c.gpuMHz,
-		holdUntil: map[[2]int]time.Time{}, fails: map[[2]int]int{}, probeEvery: firstProbe}
+		holdUntil: map[[2]int]time.Time{}, fails: map[[2]int]int{}, probeEvery: firstProbe, memory: firstMemory}
 }
 
 func (c *controller) enter(s state, now time.Time) {
 	c.state, c.ticks, c.good, c.above = s, 0, 0, 0
 	c.lateSince = now
+	if s != probe { // a probe returns to the floors it left; anything else starts again from ample clocks
+		c.trial = false
+	}
+}
+
+// blocked reports whether a setting is being left alone: it failed recently, or
+// it is no faster in either clock than one that did.
+func (c *controller) blocked(to [2]int, now time.Time) bool {
+	for failed, until := range c.holdUntil {
+		if now.Before(until) && to[0] <= failed[0] && to[1] <= failed[1] {
+			return true
+		}
+	}
+	return false
+}
+
+// heaviest returns the most a frame has cost within the controller's memory.
+func (c *controller) heaviest(now time.Time) (cpu, gpu float64) {
+	for _, w := range c.recent {
+		if now.Sub(w.at) <= c.memory {
+			cpu, gpu = max(cpu, w.cpu), max(gpu, w.gpu)
+		}
+	}
+	return cpu, gpu
+}
+
+// fail records that a setting could not hold the target and leaves it alone
+// for a while, longer each time.
+func (c *controller) fail(at [2]int, now time.Time) {
+	c.fails[at]++
+	c.holdUntil[at] = now.Add(firstHold << min(c.fails[at]-1, 5))
 }
 
 // step consumes one sample, updates the two floors and names what it did.
@@ -190,23 +250,46 @@ func (c *controller) step(s sample) (action string) {
 		if s.now.Sub(c.lastDown) < 3*time.Second && c.lastDownTo == [2]int{c.cpu, c.gpu} {
 			// The step we just took was one too many. Undo it and leave that setting
 			// alone for a while, longer each time it fails.
-			c.fails[c.lastDownTo]++
-			c.holdUntil[c.lastDownTo] = s.now.Add(firstHold << min(c.fails[c.lastDownTo]-1, 5))
+			c.fail(c.lastDownTo, s.now)
 			c.cpu, c.gpu = c.undo[0], c.undo[1]
 			c.lateSince = s.now
+			if c.lastDownWas {
+				// The trial found the edge, so this thread and the GPU take turns. Go
+				// back to where the trials began: the settings in between hold the
+				// target, but with nothing to spare.
+				c.turnsUntil, c.trial = s.now.Add(turnsFor), false
+				c.cpu, c.gpu = c.trialBase[0], c.trialBase[1]
+				return "undo-trial"
+			}
 			return "undo-late"
 		}
 		// Late for a reason we did not cause: the scene got heavier, or the content
-		// changed rate. Either way ample clocks answer it.
+		// changed rate. Either way ample clocks answer it, and these floors have
+		// shown they cannot carry this game through its heavier moments.
+		c.fail([2]int{c.cpu, c.gpu}, s.now)
+		c.memory = min(c.memory*2, maxMemory)
 		c.cpu, c.gpu = s.cpuLimit, s.gpuLimit
 		c.enter(learn, s.now)
 		return "rescue-late"
 	}
 
 	c.good++
+	if s.fps > 0 && s.cpuNow > 0 && s.gpuNow > 0 {
+		c.recent = append(c.recent, work{s.now, s.hotBusy * float64(s.cpuNow) / s.fps, s.gpuBusy * float64(s.gpuNow) / s.fps})
+		for s.now.Sub(c.recent[0].at) > maxMemory {
+			c.recent = c.recent[1:]
+		}
+	}
 	// A scene that changes while it is being held on a clean lower rate gives no
 	// lateness to notice, but its busy share moves. Treat that as a reason to look.
 	busy := s.hotBusy + s.gpuBusy
+	if busy >= overlap {
+		if c.over++; c.over >= overlapTicks {
+			c.sideBySide = true
+		}
+	} else {
+		c.over = 0
+	}
 	if c.good == 1 || c.busyRef == 0 {
 		c.busyRef = busy
 	}
@@ -239,48 +322,60 @@ func (c *controller) step(s sample) (action string) {
 		return ""
 	}
 
-	// Candidate steps down and the busy shares each would leave behind.
+	// Candidate steps down, and the busy shares each would leave behind at the
+	// heaviest recent moment if the clocks then sat exactly on the floors. The
+	// stock governors may well run above a floor, but they are what lets a game
+	// starve in the first place, so nothing is assumed of them.
 	type cand struct {
 		to       [2]int
 		hot, gpu float64
 		name     string
 	}
+	cpuWork, gpuWork := c.heaviest(s.now)
+	share := func(to [2]int) (hot, gpu float64) {
+		return cpuWork * c.target / float64(c.cpuMHz[to[0]]), gpuWork * c.target / float64(c.gpuMHz[to[1]])
+	}
 	var cands []cand
 	if c.cpu > 0 {
-		hot := s.hotBusy // a floor the CPU governor already runs above costs nothing to lower
-		if s.cpuNow <= c.cpuMHz[c.cpu] {
-			hot = s.hotBusy * float64(s.cpuNow) / float64(c.cpuMHz[c.cpu-1])
-		}
-		cands = append(cands, cand{[2]int{c.cpu - 1, c.gpu}, hot, s.gpuBusy, fmt.Sprintf("cpu%d", c.cpuMHz[c.cpu-1])})
+		to := [2]int{c.cpu - 1, c.gpu}
+		hot, gpu := share(to)
+		cands = append(cands, cand{to, hot, gpu, fmt.Sprintf("cpu%d", c.cpuMHz[to[0]])})
 	}
 	if c.gpu > 0 {
-		gpu := s.gpuBusy
-		if s.gpuNow <= c.gpuMHz[c.gpu] {
-			gpu = s.gpuBusy * float64(s.gpuNow) / float64(c.gpuMHz[c.gpu-1])
-		}
-		cands = append(cands, cand{[2]int{c.cpu, c.gpu - 1}, s.hotBusy, gpu, fmt.Sprintf("gpu%d", c.gpuMHz[c.gpu-1])})
+		to := [2]int{c.cpu, c.gpu - 1}
+		hot, gpu := share(to)
+		cands = append(cands, cand{to, hot, gpu, fmt.Sprintf("gpu%d", c.gpuMHz[to[1]])})
 	}
-	best := -1
+	best, bestTrial := -1, false
 	for i, k := range cands {
-		ok := k.hot < slack && k.gpu < slack
-		// A thread and a GPU that take turns share one frame between them.
-		if s.hotBusy+s.gpuBusy < overlap {
-			ok = ok && k.hot+k.gpu < slack
-		}
-		if !ok || s.now.Before(c.holdUntil[k.to]) {
+		if k.hot >= slack || k.gpu >= slack || c.blocked(k.to, s.now) {
 			continue
 		}
-		if best < 0 || k.hot+k.gpu < cands[best].hot+cands[best].gpu {
-			best = i
+		// Past the take-turns limit a step is a trial, unless the two are known to
+		// work side by side; no trials while a failed one is remembered.
+		trial := !c.sideBySide && k.hot+k.gpu >= slack
+		if trial && s.now.Before(c.turnsUntil) {
+			continue
+		}
+		better := best < 0 || (bestTrial && !trial) ||
+			(trial == bestTrial && k.hot+k.gpu < cands[best].hot+cands[best].gpu)
+		if better {
+			best, bestTrial = i, trial
 		}
 	}
-	if best < 0 {
-		c.fast = false // nothing safe left to lower: the quick descent is over
+	if best < 0 || (bestTrial && c.fast) {
+		c.fast = false // nothing safe left to lower quickly: the rest goes one careful step at a time
 		return ""
+	}
+	if bestTrial && !c.trial {
+		c.trial, c.trialBase = true, [2]int{c.cpu, c.gpu}
 	}
 	c.undo = [2]int{c.cpu, c.gpu}
 	c.cpu, c.gpu = cands[best].to[0], cands[best].to[1]
-	c.lastDown, c.lastDownTo = s.now, cands[best].to
+	c.lastDown, c.lastDownTo, c.lastDownWas = s.now, cands[best].to, bestTrial
 	c.good = 0
+	if bestTrial {
+		return "try-" + cands[best].name
+	}
 	return "down-" + cands[best].name
 }
