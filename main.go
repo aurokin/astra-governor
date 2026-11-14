@@ -318,19 +318,18 @@ type governor struct {
 	gpuMHz   []int            // KGSL frequencies by power level (index = level; lower level is faster)
 	cpuFreqs map[string][]int // each cluster's frequency table in kHz, ascending
 	stock    map[string]string
-	entryGPU int // the vendor's GPU floor level when the game scene started
 	game     bool
 
-	f        frames
-	pid      int
-	pkg      string
-	threads  map[int]threadTicks
-	lastThr  time.Time
-	cpuPrev  map[string]table
-	gpuPrev  table
-	busySum  float64
-	busyN    int
-	lastGame time.Time
+	f       frames
+	pid     int
+	pkg     string
+	threads map[int]threadTicks
+	lastThr time.Time
+	cpuPrev map[string]table
+	gpuPrev table
+	busySum float64
+	busyN   int
+	leftAt  time.Time // when the last game scene ended
 }
 
 // gpuIndexToLevel maps the controller's ascending GPU table onto KGSL levels:
@@ -378,23 +377,24 @@ func (g *governor) apply() {
 	}
 }
 
-// leaveGame hands the floors and IFAS parameters back. The GPU floor is only
-// restored if the vendor has not taken it over: Diablo pins the floor to the
-// ceiling, and the first daemon could undo that pin when its own floor happened
-// to sit on the same level.
+// leaveGame hands the floors and IFAS parameters back. The GPU floor goes back
+// to the vendor's base level, which is where every mode except Diablo keeps it.
+// (The level found on entry is not trustworthy: after a visit to Diablo the
+// vendor itself leaves the floor raised until the next mode change.) Diablo
+// pins the floor to the ceiling, so there it is left alone; the first daemon
+// could undo that pin when its own floor happened to sit on the same level.
 func (g *governor) leaveGame() {
 	if !g.game {
 		return
 	}
 	g.game = false
+	g.leftAt = time.Now()
 	// Stock leaves each cluster's minimum at the bottom of its table.
 	for _, p := range policies {
 		write(cpufreq+p+"/scaling_min_freq", strconv.Itoa(g.cpuFreqs[p][0]))
 	}
-	pinned := readInt(kgsl+"min_pwrlevel") == readInt(kgsl+"max_pwrlevel")
-	diablo := strings.TrimSpace(run(2*time.Second, "/system/bin/settings", "get", "global", "performance_mode_value")) == "4"
-	if !pinned && !diablo && readInt(kgsl+"min_pwrlevel") == g.gpuLevel(g.c.gpu) {
-		write(kgsl+"min_pwrlevel", strconv.Itoa(g.entryGPU))
+	if !diablo() && readInt(kgsl+"min_pwrlevel") == g.gpuLevel(g.c.gpu) {
+		write(kgsl+"min_pwrlevel", strconv.Itoa(g.baseLevel()))
 	}
 	for k, v := range g.stock {
 		if read(ifasParams+k) != v {
@@ -404,9 +404,25 @@ func (g *governor) leaveGame() {
 	g.c.reset()
 }
 
+func diablo() bool {
+	return strings.TrimSpace(run(2*time.Second, "/system/bin/settings", "get", "global", "performance_mode_value")) == "4"
+}
+
+// repin covers the one ordering leaveGame cannot see: the vendor pins the GPU
+// for Diablo and reports the mode only afterwards, so our restore lands on top
+// of the pin. For a few seconds after leaving, put a lost pin back.
+func (g *governor) repin() {
+	if g.leftAt.IsZero() || time.Since(g.leftAt) > 5*time.Second {
+		return
+	}
+	if lo, hi := readInt(kgsl+"min_pwrlevel"), readInt(kgsl+"max_pwrlevel"); lo != hi && diablo() {
+		write(kgsl+"min_pwrlevel", strconv.Itoa(hi))
+		log.Printf("put the Diablo GPU pin back (level %d)", hi)
+	}
+}
+
 func (g *governor) enterGame() {
 	g.game = true
-	g.entryGPU = readInt(kgsl + "min_pwrlevel")
 	g.c.reset()
 	g.f = frames{}
 	g.cpuPrev, g.gpuPrev, g.threads = nil, nil, nil
@@ -437,6 +453,7 @@ func (g *governor) step() {
 	}
 	st := status{Time: now.Format(time.RFC3339), Enabled: g.enabled, Game: g.game}
 	if !g.game {
+		g.repin()
 		g.st = st
 		return
 	}
