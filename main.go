@@ -501,6 +501,7 @@ func (g *governor) step() {
 		log.Printf("game scene off")
 	}
 	st := status{Time: now.Format(time.RFC3339), Enabled: g.enabled, Game: g.game}
+	st.SkinC, st.BattC = float64(readInt(skinZone()))/1000, float64(readInt("/sys/class/power_supply/battery/temp"))/10
 	if !g.game {
 		g.repin()
 		g.st = st
@@ -588,7 +589,6 @@ func (g *governor) step() {
 			st.CPUCur[i] = meanMHz(prev[p], cpuCur[p])
 		}
 	}
-	st.SkinC, st.BattC = float64(readInt(skinZone()))/1000, float64(readInt("/sys/class/power_supply/battery/temp"))/10
 	g.st = st
 }
 
