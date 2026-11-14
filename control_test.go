@@ -48,6 +48,7 @@ type rig struct {
 	limits   [2]int
 	lateTick int
 	locked   time.Duration // how long the delivered rate has sat exactly on a fraction of the panel rate
+	gpuSeen  []float64     // GPU busy shares not yet reported: the kernel's figure trails by about a second
 }
 
 func newRig() *rig {
@@ -74,8 +75,12 @@ func (r *rig) tick(g game) float64 {
 	} else {
 		k, r.locked = 0, 0
 	}
+	r.gpuSeen = append(r.gpuSeen, gpu)
+	if len(r.gpuSeen) > 3 {
+		r.gpuSeen = r.gpuSeen[1:]
+	}
 	a := r.c.step(sample{now: r.now, flowing: true, fps: fps, fps6: sum / float64(len(r.hist)), panelHz: panel, lockK: k, lockedFor: r.locked,
-		gpuBusy: gpu, hotBusy: hot, cpuNow: cpuTable[r.c.cpu], gpuNow: gpuTable[r.c.gpu], cpuLimit: r.limits[0], gpuLimit: r.limits[1]})
+		gpuBusy: r.gpuSeen[0], hotBusy: hot, cpuNow: cpuTable[r.c.cpu], gpuNow: gpuTable[r.c.gpu], cpuLimit: r.limits[0], gpuLimit: r.limits[1]})
 	r.actions = append(r.actions, a)
 	if fps < g.fps*0.975 {
 		r.lateTick++

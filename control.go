@@ -44,6 +44,7 @@ type controller struct {
 	confirmedLock int
 	lockAtProbe   int       // the hold count the frames were locked to when the probe began
 	lateSince     time.Time // start of the 6 s window used for mild sustained lateness
+	rough         bool      // the target is still a one-second count, to be replaced by a six-second one
 
 	// Whether the busiest thread and the GPU take turns within a frame or work
 	// side by side decides how far the clocks can come down: taking turns, their
@@ -100,6 +101,8 @@ const (
 	firstProbe    = 20 * time.Second
 	maxProbe      = 120 * time.Second
 	busyShift     = 0.15 // a change in busy share this large at an unchanged rate means the scene changed
+	settleTicks   = 4    // ticks after a change of floors before busy shares are trusted
+	nearPanel     = 0.97 // content this close to the panel's rate has nothing more to ask for
 	// Content on its own clock drifts against the panel and shows an odd hold every
 	// few seconds (3 s for 59.94, 7 s for 30.00 on this 60.27 Hz panel). Frames that
 	// hold exactly the same number of refreshes for this long are locked to the
@@ -208,6 +211,7 @@ func (c *controller) step(s sample) (action string) {
 		c.target, c.fast, c.probeEvery, c.confirmedLock = s.fps, true, firstProbe, 0
 		c.nextProbe = s.now.Add(c.probeEvery)
 		c.enter(track, s.now)
+		c.rough = true
 		return fmt.Sprintf("target-%.1f", c.target)
 
 	case probe:
@@ -218,6 +222,7 @@ func (c *controller) step(s sample) (action string) {
 		if s.fps > c.target*(1+fasterBy) {
 			// The content had more to give: it was being held on a lower rate.
 			c.target, c.fast, c.probeEvery, c.confirmedLock = s.fps, true, firstProbe, 0
+			c.rough = true
 			action = fmt.Sprintf("probe-found-%.1f", c.target)
 		} else {
 			c.cpu, c.gpu = c.saved[0], c.saved[1]
@@ -236,7 +241,7 @@ func (c *controller) step(s sample) (action string) {
 		// (a 30 fps cutscene ended) and the clocks happened to be enough for it.
 		if c.above++; c.above >= 2 {
 			c.target, c.above, c.probeEvery = s.fps, 0, firstProbe
-			c.nextProbe, c.lateSince = s.now.Add(c.probeEvery), s.now
+			c.nextProbe, c.lateSince, c.rough = s.now.Add(c.probeEvery), s.now, true
 			return fmt.Sprintf("target-up-%.1f", c.target)
 		}
 	} else {
@@ -274,6 +279,10 @@ func (c *controller) step(s sample) (action string) {
 	}
 
 	c.good++
+	if c.rough && s.now.Sub(c.lateSince) >= 6*time.Second {
+		// Six seconds on time since the target was set: all of them were at this rate.
+		c.target, c.rough = s.fps6, false
+	}
 	if s.fps > 0 && s.cpuNow > 0 && s.gpuNow > 0 {
 		c.recent = append(c.recent, work{s.now, s.hotBusy * float64(s.cpuNow) / s.fps, s.gpuBusy * float64(s.gpuNow) / s.fps})
 		for s.now.Sub(c.recent[0].at) > maxMemory {
@@ -290,10 +299,11 @@ func (c *controller) step(s sample) (action string) {
 	} else {
 		c.over = 0
 	}
-	if c.good == 1 || c.busyRef == 0 {
-		c.busyRef = busy
-	}
-	if d := busy - c.busyRef; d > busyShift || d < -busyShift {
+	// The GPU's busy figure trails a change of floors by a second or so, so the
+	// reference is taken, and compared against, only once it has caught up.
+	if c.good <= settleTicks {
+		c.busyRef, c.busyOff = busy, 0
+	} else if d := busy - c.busyRef; d > busyShift || d < -busyShift {
 		c.busyOff++
 	} else {
 		c.busyOff = 0
@@ -301,7 +311,7 @@ func (c *controller) step(s sample) (action string) {
 	locked := s.lockK >= 2 && s.lockedFor >= lockedLong && s.lockK != c.confirmedLock
 	sceneChanged := c.busyOff >= 2 || locked
 	// Content already at the panel's rate cannot want more; anything slower might.
-	if c.target < s.panelHz*0.985 && (sceneChanged || s.now.After(c.nextProbe)) && (c.cpu < s.cpuLimit || c.gpu < s.gpuLimit) {
+	if c.target < s.panelHz*nearPanel && (sceneChanged || s.now.After(c.nextProbe)) && (c.cpu < s.cpuLimit || c.gpu < s.gpuLimit) {
 		if sceneChanged {
 			c.probeEvery = firstProbe
 		}
