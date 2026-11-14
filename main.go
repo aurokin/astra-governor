@@ -17,6 +17,14 @@
 //
 // Everything it writes is runtime sysfs state that disappears on reboot.
 // Thermal limits are untouched: a floor never goes above the vendor's cap.
+//
+// It also keeps its own, earlier thermal limit. When the skin sensor passes
+// about 40.5 C the vendor cuts the CPU ceilings to 2400/2842 MHz at a stroke
+// for a minute or two at a time, in Diablo and under high floors alike, and a
+// heavy game drops frames in clusters while that lasts. Floors are most of the
+// difference between a game at 10 W and the same game at 7 W, so from 38.5 C
+// the highest floor this daemon will set comes down a step at a time until the
+// temperature stops rising, and goes back up once it has fallen.
 package main
 
 import (
@@ -46,6 +54,10 @@ const (
 	kgsl       = "/sys/class/kgsl/kgsl-3d0/"
 	cpufreq    = "/sys/devices/system/cpu/cpufreq/"
 	tick       = 500 * time.Millisecond
+
+	trimFrom = 38.5 // skin C from which the highest floor comes down while the temperature is not falling
+	trimHard = 39.5 // and from which it comes down regardless
+	trimBack = 37.5 // skin C below which it goes back up
 )
 
 // The two CPU clusters: six performance cores and two prime cores.
@@ -327,6 +339,7 @@ type status struct {
 	CPUCur     [2]int  `json:"cpu_cur_mhz"`    // average clock of each cluster over the last tick
 	CPUCap     [2]int  `json:"cpu_cap_mhz"`    // the vendor's current ceiling for each cluster
 	CPUFloors  [2]int  `json:"cpu_floors_mhz"` // the floor each cluster holds
+	Trim       int     `json:"thermal_steps"`  // steps the highest floors are held below the vendor's limits, for heat
 	Demand     int     `json:"demand_mhz"`     // where the stock governor reaches above the busiest cluster's floor, 0 if nowhere
 	LoadSum    float64 `json:"load_sum"`
 	SkinC      float64 `json:"skin_c"`
@@ -344,22 +357,25 @@ type governor struct {
 	stock    map[string]string
 	game     bool
 
-	f       frames
-	pid     int
-	pkg     string
-	threads map[int]threadTicks
-	lastThr time.Time
-	cpuPrev map[string]table
-	gpuPrev table
-	busySum float64
-	busyN   int
-	leftAt  time.Time          // when the last game scene ended
-	hot     string             // the cluster the game's busiest thread runs on
-	hotFor  int                // ticks in a row the busiest thread was seen on the other one
-	floor   map[string]int     // the floor each cluster currently holds, kHz
-	since   map[string][]table // each cluster's clock residency per tick since its floor last changed, newest last
-	side    []float64          // recent ratios of the other cluster's heaviest game thread to the busiest one, as work
-	hold    []int              // for experiments: floors in MHz (prime cores, GPU, other cores) to hold in games instead of running the control law
+	f        frames
+	pid      int
+	pkg      string
+	threads  map[int]threadTicks
+	lastThr  time.Time
+	cpuPrev  map[string]table
+	gpuPrev  table
+	busySum  float64
+	busyN    int
+	leftAt   time.Time          // when the last game scene ended
+	hot      string             // the cluster the game's busiest thread runs on
+	hotFor   int                // ticks in a row the busiest thread was seen on the other one
+	floor    map[string]int     // the floor each cluster currently holds, kHz
+	since    map[string][]table // each cluster's clock residency per tick since its floor last changed, newest last
+	side     []float64          // recent ratios of the other cluster's heaviest game thread to the busiest one, as work
+	hold     []int              // for experiments: floors in MHz (prime cores, GPU, other cores) to hold in games instead of running the control law
+	trim     int                // steps the highest floors are held below the vendor's limits, for heat
+	trimAt   time.Time          // when that last changed
+	trimSkin float64            // the skin temperature then
 }
 
 // gpuIndexToLevel maps the controller's ascending GPU table onto KGSL levels:
@@ -536,9 +552,44 @@ func (g *governor) enterGame() {
 	g.f = frames{}
 	g.cpuPrev, g.gpuPrev, g.threads = nil, nil, nil
 	g.hot, g.hotFor, g.floor, g.since, g.side = policies[0], 0, map[string]int{}, map[string][]table{}, nil
+	if float64(readInt(skinZone()))/1000 <= trimBack {
+		g.trim = 0 // cooled off since the last game
+	}
 }
 
-// limits returns the highest floors the vendor currently allows, as controller indices.
+// retrim moves the daemon's own thermal limit: down a step every twenty seconds
+// while the skin is warm and not cooling, up a step a minute once it has cooled.
+func (g *governor) retrim(now time.Time) {
+	skin := float64(readInt(skinZone())) / 1000
+	was := g.trim
+	switch {
+	case skin >= trimFrom && now.Sub(g.trimAt) >= 20*time.Second && (skin >= trimHard || skin >= g.trimSkin):
+		g.trim++
+	case skin <= trimBack && g.trim > 0 && now.Sub(g.trimAt) >= time.Minute:
+		g.trim--
+	default:
+		return
+	}
+	// Past 2 GHz and 525 MHz there is little left to give; the rest is the vendor's to limit.
+	g.trim = min(g.trim, len(g.c.cpuMHz)-1, len(g.c.gpuMHz)-1)
+	g.trimAt, g.trimSkin = now, skin
+	if g.trim != was {
+		log.Printf("thermal limit %d steps below the vendor's (skin %.1f C)", g.trim, skin)
+	}
+}
+
+// trimmed lowers a limit by the thermal steps, but not below the first table entry of at least lowest MHz.
+func (g *governor) trimmed(limit int, table []int, lowest int) int {
+	for i, f := range table {
+		if f >= lowest {
+			return max(min(limit, i), limit-g.trim)
+		}
+	}
+	return limit
+}
+
+// limits returns the highest floors the vendor currently allows, less our own
+// thermal steps, as controller indices.
 func (g *governor) limits() (cpu, gpu int) {
 	capMHz := readInt(cpufreq+g.hot+"/scaling_max_freq") / 1000
 	for i, f := range g.c.cpuMHz {
@@ -546,8 +597,11 @@ func (g *governor) limits() (cpu, gpu int) {
 			cpu = i
 		}
 	}
-	gpu = max(0, g.baseLevel()-readInt(kgsl+"max_pwrlevel"))
-	return cpu, min(gpu, len(g.c.gpuMHz)-1)
+	gpu = min(max(0, g.baseLevel()-readInt(kgsl+"max_pwrlevel")), len(g.c.gpuMHz)-1)
+	if g.hold != nil {
+		return cpu, gpu
+	}
+	return g.trimmed(cpu, g.c.cpuMHz, 1996), g.trimmed(gpu, g.c.gpuMHz, 525)
 }
 
 func (g *governor) step() {
@@ -660,6 +714,7 @@ func (g *governor) step() {
 	gpuBusy := g.busySum / float64(max(g.busyN, 1))
 	g.busySum, g.busyN = 0, 0
 
+	g.retrim(now)
 	cpuLimit, gpuLimit := g.limits()
 	panelHz := 0.0
 	if g.f.periodNs > 0 {
@@ -696,7 +751,7 @@ func (g *governor) step() {
 	st.CPULimit, st.GPULimit = g.c.cpuMHz[cpuLimit], g.c.gpuMHz[gpuLimit]
 	st.CPUNow, st.GPUNow, st.GPUBusy = cpuNow, gpuNow, gpuBusy
 	st.HotThread, st.HotBusy, st.HotCPU = hotName, hotBusy, hotCPU
-	st.Package, st.LoadSum, st.Demand = g.pkg, hotBusy+gpuBusy, demand
+	st.Package, st.LoadSum, st.Demand, st.Trim = g.pkg, hotBusy+gpuBusy, demand, g.trim
 	if g.c.target > 0 {
 		st.LongFrames = g.f.longer(time.Second, 1.5e9/g.c.target)
 	}
