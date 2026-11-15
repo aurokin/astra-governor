@@ -63,6 +63,7 @@ type controller struct {
 	lateRun   int           // consecutive ticks whose newest frames were late
 	rest      time.Time     // after a rescue, stay at ample clocks until then
 	moved     time.Time     // when the floors last changed
+	cpuTop    time.Time     // since when the CPU floor has been at its limit while tracking; zero if it is not
 	spend     time.Time     // a thrifty GPU floor left the game late: hold the full one until then
 	spendWait time.Duration // how long that lasts; doubles each time it happens again
 
@@ -143,6 +144,9 @@ const (
 	// more room than a step down needs, because this floor is not open to blame.
 	thriftySlack = 0.70
 	spendFor     = 5 * time.Minute // how long a thrifty floor that left the game late is not tried again, at first
+	// How long the CPU floor must have sat at its limit to count as staying there.
+	// After a rescue the law leaves it within six seconds if anything lower will do.
+	cpuTopFor = 10 * time.Second
 )
 
 // sample is one tick of measurements for the app in front.
@@ -166,11 +170,12 @@ type sample struct {
 	lockedFor time.Duration
 	cpuLimit  int // highest CPU floor index the vendor's current caps allow
 	gpuLimit  int // highest GPU floor index the vendor's current ceiling allows
-	// The board is close to the vendor's thermal cut. A GPU floor above what the
-	// GPU's busy share calls for is then the cheapest heat to give up: late frames
-	// push the floor there on suspicion (God of War II's own late frames take it
-	// to the top clock for about a watt and no fewer late frames), and the next
-	// thing to go would be CPU clock that is known to matter.
+	// The board is close to the vendor's thermal cut. In a game that keeps the
+	// CPU floor at its limit, a GPU floor above what the GPU's busy share
+	// calls for is then the cheapest heat to give up: late frames push the floor there on suspicion
+	// (God of War II's own late frames take it to the top clock for about a watt
+	// and no fewer late frames), and the next thing to go would be CPU clock that
+	// is known to matter.
 	thrifty bool
 }
 
@@ -217,7 +222,10 @@ func (c *controller) heaviest(now time.Time) (cpu, gpu float64, demand int) {
 
 // gpuNeed is the lowest GPU floor that keeps the GPU's busy share under
 // thriftySlack at the heaviest recent moment, or the vendor's limit while
-// nothing is known.
+// nothing is known. It does not allow for the busiest thread and the GPU
+// taking turns within a frame, as a step down does: in God of War II that
+// asked for 900 MHz and more, where fixed floors of 525 MHz dropped no more
+// frames than 1100 MHz. A game it does starve gets its floor back (rescue-gpu).
 func (c *controller) gpuNeed(now time.Time, limit int) int {
 	_, work, _ := c.heaviest(now)
 	if work == 0 || c.target == 0 {
@@ -272,9 +280,24 @@ func (c *controller) step(s sample) (action string) {
 		}
 	}(c.cpu, c.gpu)
 	gpuAllowed := s.gpuLimit
-	if s.thrifty && !s.now.Before(c.spend) {
+	if c.cpu < s.cpuLimit || c.state != track {
+		c.cpuTop = time.Time{}
+	} else if c.cpuTop.IsZero() {
+		c.cpuTop = s.now
+	}
+	if s.thrifty && !s.now.Before(c.spend) && c.target >= s.panelHz*nearPanel &&
+		!c.cpuTop.IsZero() && s.now.Sub(c.cpuTop) >= cpuTopFor {
 		// From here on this is the most GPU floor there is: a single late frame with
 		// both floors at their limits is held against nothing.
+		//
+		// Only for content at the panel's rate, where a frame's share of the GPU
+		// says whether it fits its refresh. Slower content does not have a whole
+		// frame time to spare: each frame still has to land on its refresh, and
+		// with this applied Harry Potter (25 fps) lost seven seconds in ten to
+		// uneven frames at a GPU busy share of 45%. And only where the CPU floor
+		// stays at its limit anyway, as bursts keep it in God of War II: elsewhere
+		// the law trades one clock for the other, and a GPU floor held down makes
+		// it pay in CPU clock (Mario Galaxy, +0.5 W).
 		s.gpuLimit = c.gpuNeed(s.now, s.gpuLimit)
 	}
 	if !s.flowing {

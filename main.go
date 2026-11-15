@@ -370,6 +370,7 @@ type governor struct {
 	side    []float64          // recent ratios of the other cluster's heaviest game thread to the busiest one, as work
 	heat    heat               // CPU ceilings against the vendor's thermal cut
 	heatC   float64            // the temperature to hold in Rise, 0 for none
+	thrifty bool               // for experiments: give up spare GPU floor whatever the temperature
 	capKHz  map[string]int     // the ceiling we last asked for on each cluster, 0 if none
 	fanMin  int                // the slowest fan level to allow in games, 1-5; 0 leaves the fan to the vendor
 	fanWas  int                // the fan level found before our first write in this game, 0 if we have not written
@@ -764,7 +765,7 @@ func (g *governor) step() {
 	if g.hold == nil {
 		action = g.c.step(sample{now: now, flowing: flowing, fps: fps, fps6: fps6, fpsNow: fpsNow, panelHz: panelHz,
 			gpuBusy: gpuBusy, hotBusy: hotBusy, cpuNow: cpuNow, gpuNow: gpuNow, demand: demand,
-			lockK: g.f.curHold, lockedFor: lockedFor, cpuLimit: cpuLimit, gpuLimit: gpuLimit, thrifty: g.heat.saving})
+			lockK: g.f.curHold, lockedFor: lockedFor, cpuLimit: cpuLimit, gpuLimit: gpuLimit, thrifty: g.heat.saving || g.thrifty})
 	} else {
 		g.c.cpu, g.c.gpu = 0, 0
 		for i, f := range g.c.cpuMHz[:cpuLimit+1] {
@@ -856,12 +857,13 @@ func main() {
 	hold := flag.String("hold", "", "for experiments: hold these floors in games (\"cpuMHz,gpuMHz[,otherCoresMHz]\": the first is for the prime cores, and for the rest unless a third is given) instead of running the control law")
 	fanMin := flag.Int("fan", 0, "the slowest fan level to allow in games, 1-5 (the vendor runs 2 until the tablet is hot); 0 leaves the fan to the vendor")
 	heatC := flag.Float64("heat", 0, "in Rise, hold the board sensor (xo-therm) at or under this many C by giving up spare GPU floor and then CPU ceilings a step at a time; the vendor cuts the ceilings hard at 49. 0 leaves both alone")
+	thrifty := flag.Bool("thrifty", false, "for experiments: give up spare GPU floor whatever the temperature, as -heat does near its target")
 	flag.Parse()
 	if *logPath != "" {
 		log.SetOutput(&logFile{path: *logPath})
 	}
 
-	g := &governor{enabled: !*monitor, stock: map[string]string{}, cpuFreqs: map[string][]int{}, fanMin: *fanMin}
+	g := &governor{enabled: !*monitor, stock: map[string]string{}, cpuFreqs: map[string][]int{}, fanMin: *fanMin, thrifty: *thrifty}
 	g.heatC = *heatC
 	if *hold != "" {
 		g.hold = []int{0, 0, 0}
