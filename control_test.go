@@ -30,13 +30,16 @@ type game struct {
 	// are late. The stock governor climbs to burstMHz for each burst, a frame too late.
 	burstMHz   int
 	burstEvery time.Duration
+	// Work per frame done in turn with the rest by threads other than the busiest,
+	// which no busy share the controller sees accounts for.
+	hiddenMs float64
 }
 
 func (g game) run(cpuMHz, gpuMHz int) (fps, hot, gpu float64) {
 	ct := g.cpuMs * float64(cpuTable[len(cpuTable)-1]) / float64(cpuMHz)
 	gt := g.gpuMs * float64(gpuTable[len(gpuTable)-1]) / float64(gpuMHz)
 	fps = g.fps
-	frame := ct + gt
+	frame := ct + gt + g.hiddenMs
 	if g.sideBySide {
 		frame = math.Max(ct, gt)
 	}
@@ -56,7 +59,11 @@ type rig struct {
 	limits   [2]int
 	lateTick int
 	locked   time.Duration // how long the delivered rate has sat exactly on a fraction of the panel rate
-	gpuSeen  []float64     // GPU busy shares not yet reported: after a change of floors the figure trails by up to three seconds
+	// GPU busy shares not yet reported. After a step down the GPU's own governor
+	// takes up to three seconds to come down to the new floor and the busy share
+	// trails with it; a raised floor takes effect at once.
+	gpuSeen  []float64
+	gpuWas   int
 	rnd      *rand.Rand
 	hitchAt  time.Time // the game's next own late frame
 	cpuWas   int
@@ -64,6 +71,8 @@ type rig struct {
 	echo     int       // ticks for which the last one is still inside the one-second rate
 	hitches  int
 	ampleFor int // ticks spent with both floors at the vendor's limits
+	thrifty  bool
+	gpuSum   int // GPU floor summed over ticks, MHz
 }
 
 func newRig() *rig {
@@ -126,12 +135,17 @@ func (r *rig) tick(g game) float64 {
 	} else {
 		k, r.locked = 0, 0
 	}
+	if r.c.gpu > r.gpuWas {
+		r.gpuSeen = nil
+	}
+	r.gpuWas = r.c.gpu
 	r.gpuSeen = append(r.gpuSeen, gpu)
 	if len(r.gpuSeen) > 7 {
 		r.gpuSeen = r.gpuSeen[1:]
 	}
 	a := r.c.step(sample{now: r.now, flowing: true, fps: fps, fps6: sum / float64(len(r.hist)), fpsNow: fpsNow, panelHz: panel, lockK: k, lockedFor: r.locked,
-		gpuBusy: r.gpuSeen[0], hotBusy: hot, cpuNow: cpuTable[r.c.cpu], gpuNow: gpuTable[r.c.gpu], demand: demand, cpuLimit: r.limits[0], gpuLimit: r.limits[1]})
+		gpuBusy: r.gpuSeen[0], hotBusy: hot, cpuNow: cpuTable[r.c.cpu], gpuNow: gpuTable[r.c.gpu], demand: demand, cpuLimit: r.limits[0], gpuLimit: r.limits[1], thrifty: r.thrifty})
+	r.gpuSum += gpuTable[r.c.gpu]
 	r.actions = append(r.actions, a)
 	if fps < g.fps*0.975 {
 		r.lateTick++
@@ -460,5 +474,80 @@ func TestBurstsTheStockGovernorClimbsForAreMetByTheFloor(t *testing.T) {
 	}
 	if got := gpuTable[r.c.gpu]; got > 443 {
 		t.Errorf("GPU floor %d MHz: bursts on the CPU side kept the GPU clock up too", got)
+	}
+}
+
+func TestHotBoardGivesUpGPUFloorHeldOnSuspicion(t *testing.T) {
+	// The game's own late frames are held against whatever GPU floor is in place
+	// at the time, which walks it up to the top clock although the GPU is busy an
+	// eighth of the time there.
+	g := game{cpuMs: 9, gpuMs: 2, fps: 59.94, sideBySide: true, hitchEvery: 40 * time.Second}
+	mean := map[bool]int{}
+	for _, thrifty := range []bool{false, true} {
+		r := newRig()
+		r.run(g, 120)
+		r.thrifty = thrifty
+		r.gpuSum, r.lateTick, r.hitches = 0, 0, 0
+		r.run(g, 1200)
+		mean[thrifty] = r.gpuSum / 2400
+		if r.lateTick > 2*r.hitches {
+			t.Errorf("thrifty=%v: %d late half-seconds for %d late frames of the game's own", thrifty, r.lateTick, r.hitches)
+		}
+	}
+	if mean[true] > mean[false]*2/3 {
+		t.Errorf("GPU floor averaged %d MHz on a hot board against %d MHz on a cool one, want well under", mean[true], mean[false])
+	}
+}
+
+func TestHotBoardKeepsTheGPUFloorABusyGPUNeeds(t *testing.T) {
+	g := game{cpuMs: 5, gpuMs: 7, fps: 59.94, hitchEvery: 40 * time.Second}
+	r := newRig()
+	r.thrifty = true
+	r.run(g, 120)
+	r.lateTick, r.hitches = 0, 0
+	if fps := r.run(g, 1200); fps < 59 {
+		t.Errorf("the game ends at %.1f fps", fps)
+	}
+	// One more late frame is allowed for: a floor a step too low is tried once
+	// when the heaviest moment passes out of memory, and remembered from then on.
+	if r.lateTick > 2*r.hitches+2 {
+		t.Errorf("%d late half-seconds for %d late frames of the game's own", r.lateTick, r.hitches)
+	}
+}
+
+func TestHotBoardLeavesRoomForWorkThatTakesTurnsWithTheGPU(t *testing.T) {
+	// At the GPU floor its own busy share allows (222 MHz), this game's CPU and
+	// GPU work no longer fit into one frame together.
+	g := game{cpuMs: 6, gpuMs: 3, fps: 59.94, hitchEvery: 40 * time.Second}
+	r := newRig()
+	r.thrifty = true
+	r.run(g, 120)
+	r.lateTick, r.hitches = 0, 0
+	r.run(g, 1200)
+	// One more late frame is allowed for: the floors in place when the board got
+	// hot traded GPU clock for CPU clock, and that trade ends with a late frame.
+	if r.lateTick > 2*r.hitches+2 || r.c.target < 59 {
+		t.Errorf("%d late half-seconds for %d late frames of the game's own, target %.1f fps", r.lateTick, r.hitches, r.c.target)
+	}
+}
+
+func TestThriftyFloorThatStarvesTheGameIsGivenBackNotLearnedAsItsRate(t *testing.T) {
+	// Half of this game's frame is spent in threads the busy shares do not show,
+	// so the floor they call for is too low, and stays too low however long the
+	// game is starved on it: it needs the GPU within two steps of its top clock.
+	g := game{cpuMs: 5, gpuMs: 3, hiddenMs: 8, fps: 59.94}
+	r := newRig()
+	r.run(g, 120)
+	r.thrifty = true
+	r.lateTick = 0
+	r.run(g, 1200)
+	if r.c.target < 59 {
+		t.Errorf("the target became %.1f fps: the starved rate was learned as the game's own", r.c.target)
+	}
+	// A second late each time the thrifty floor is tried: at once, then after 5
+	// and 15 minutes. The law's own steps down fail another six times in a game
+	// this tight, a half-second each.
+	if tries := r.count("rescue-gpu"); tries > 3 || r.lateTick > 2*tries+6 {
+		t.Errorf("%d tries of the thrifty floor and %d late half-seconds in twenty minutes, want 3 and 12", tries, r.lateTick)
 	}
 }

@@ -59,10 +59,12 @@ type controller struct {
 	rough         bool      // the target is still a one-second count, to be replaced by a six-second one
 	// A late frame stays inside the one-second rate for two more ticks. Those are
 	// judged on the newest frames alone, so one late frame is one event.
-	deaf    int
-	lateRun int       // consecutive ticks whose newest frames were late
-	rest    time.Time // after a rescue, stay at ample clocks until then
-	moved   time.Time // when the floors last changed
+	deaf      int
+	lateRun   int           // consecutive ticks whose newest frames were late
+	rest      time.Time     // after a rescue, stay at ample clocks until then
+	moved     time.Time     // when the floors last changed
+	spend     time.Time     // a thrifty GPU floor left the game late: hold the full one until then
+	spendWait time.Duration // how long that lasts; doubles each time it happens again
 
 	// Whether the busiest thread and the GPU take turns within a frame or work
 	// side by side decides how far the clocks can come down: taking turns, their
@@ -137,6 +139,10 @@ const (
 	deafTicks = 2
 	shortNow  = 0.9             // frames missing from the newest 0.4 s that count as late again
 	restFor   = 5 * time.Second // at ample clocks after a rescue, so the heavy moment is seen before stepping down
+	// Busy share a thrifty GPU floor must leave at the heaviest recent moment:
+	// more room than a step down needs, because this floor is not open to blame.
+	thriftySlack = 0.70
+	spendFor     = 5 * time.Minute // how long a thrifty floor that left the game late is not tried again, at first
 )
 
 // sample is one tick of measurements for the app in front.
@@ -160,6 +166,12 @@ type sample struct {
 	lockedFor time.Duration
 	cpuLimit  int // highest CPU floor index the vendor's current caps allow
 	gpuLimit  int // highest GPU floor index the vendor's current ceiling allows
+	// The board is close to the vendor's thermal cut. A GPU floor above what the
+	// GPU's busy share calls for is then the cheapest heat to give up: late frames
+	// push the floor there on suspicion (God of War II's own late frames take it
+	// to the top clock for about a watt and no fewer late frames), and the next
+	// thing to go would be CPU clock that is known to matter.
+	thrifty bool
 }
 
 func newController(cpuMHz, gpuMHz []int) *controller {
@@ -170,7 +182,7 @@ func newController(cpuMHz, gpuMHz []int) *controller {
 
 func (c *controller) reset() {
 	*c = controller{cpuMHz: c.cpuMHz, gpuMHz: c.gpuMHz,
-		holdUntil: map[[2]int]time.Time{}, failed: map[[2]int][]time.Time{}, probeEvery: firstProbe, memory: firstMemory, turnsWait: turnsFor}
+		holdUntil: map[[2]int]time.Time{}, failed: map[[2]int][]time.Time{}, probeEvery: firstProbe, memory: firstMemory, turnsWait: turnsFor, spendWait: spendFor}
 }
 
 func (c *controller) enter(s state, now time.Time) {
@@ -201,6 +213,22 @@ func (c *controller) heaviest(now time.Time) (cpu, gpu float64, demand int) {
 		}
 	}
 	return cpu, gpu, demand
+}
+
+// gpuNeed is the lowest GPU floor that keeps the GPU's busy share under
+// thriftySlack at the heaviest recent moment, or the vendor's limit while
+// nothing is known.
+func (c *controller) gpuNeed(now time.Time, limit int) int {
+	_, work, _ := c.heaviest(now)
+	if work == 0 || c.target == 0 {
+		return limit
+	}
+	for i, mhz := range c.gpuMHz[:limit+1] {
+		if work*c.target/float64(mhz) < thriftySlack {
+			return i
+		}
+	}
+	return limit
 }
 
 // fail records that a setting could not hold the target and leaves it alone
@@ -243,6 +271,12 @@ func (c *controller) step(s sample) (action string) {
 			c.moved = s.now
 		}
 	}(c.cpu, c.gpu)
+	gpuAllowed := s.gpuLimit
+	if s.thrifty && !s.now.Before(c.spend) {
+		// From here on this is the most GPU floor there is: a single late frame with
+		// both floors at their limits is held against nothing.
+		s.gpuLimit = c.gpuNeed(s.now, s.gpuLimit)
+	}
 	if !s.flowing {
 		// A gap in the frames is not lateness once they resume: let it leave the rates first.
 		c.deaf, c.lateSince, c.lateRun = deafTicks, s.now, 0
@@ -327,6 +361,15 @@ func (c *controller) step(s sample) (action string) {
 		c.lateSince, c.deaf = s.now, deafTicks
 		c.good, c.fast = 0, false
 		switch {
+		case c.cpu >= s.cpuLimit && c.gpu >= s.gpuLimit && s.gpuLimit < gpuAllowed && c.lateRun >= 2:
+			// Late for a second running with GPU floor held back: the busy shares were
+			// wrong about what this game's GPU needs. Give it all back for a while,
+			// longer each time.
+			c.spend = s.now.Add(c.spendWait)
+			c.spendWait = min(c.spendWait*2, turnsMax)
+			s.gpuLimit = gpuAllowed
+			c.gpu = gpuAllowed
+			return "rescue-gpu"
 		case c.cpu >= s.cpuLimit && c.gpu >= s.gpuLimit:
 			if c.lateRun >= 4 {
 				// Late for two seconds running with nothing more to give: the content

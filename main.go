@@ -15,8 +15,12 @@
 //     game thread needs for the same headroom, so six idle cores are not held
 //     at a high clock because two busy ones need it.
 //
+// With -heat it also keeps the tablet under the vendor's thermal cut in Rise
+// (heat.go), by giving up GPU floor and then CPU ceiling a little at a time.
+//
 // Everything it writes is runtime sysfs state that disappears on reboot.
-// Thermal limits are untouched: a floor never goes above the vendor's cap.
+// The vendor's thermal limits are untouched: a floor never goes above the
+// vendor's cap, and a ceiling of ours can only be lower than theirs.
 package main
 
 import (
@@ -44,6 +48,7 @@ const (
 	ifasParams = "/sys/module/ifas/parameters/"
 	ifasEnable = "/sys/kernel/ifas/ifas_enable"
 	kgsl       = "/sys/class/kgsl/kgsl-3d0/"
+	fanDir     = "/sys/kernel/fan/"
 	cpufreq    = "/sys/devices/system/cpu/cpufreq/"
 	tick       = 500 * time.Millisecond
 )
@@ -331,6 +336,10 @@ type status struct {
 	LoadSum    float64 `json:"load_sum"`
 	SkinC      float64 `json:"skin_c"`
 	BattC      float64 `json:"batt_c"`
+	XoC        float64 `json:"xo_c"`        // the sensor the vendor's thermal cut watches (41 C)
+	HeatLevel  int     `json:"heat_level"`  // steps of CPU ceiling given up to stay under it
+	HeatSaving bool    `json:"heat_saving"` // spare GPU floor is being given up for the same reason
+	FanLevel   int     `json:"fan_level"`
 }
 
 type governor struct {
@@ -359,6 +368,12 @@ type governor struct {
 	floor   map[string]int     // the floor each cluster currently holds, kHz
 	since   map[string][]table // each cluster's clock residency per tick since its floor last changed, newest last
 	side    []float64          // recent ratios of the other cluster's heaviest game thread to the busiest one, as work
+	heat    heat               // CPU ceilings against the vendor's thermal cut
+	heatC   float64            // the temperature to hold in Rise, 0 for none
+	capKHz  map[string]int     // the ceiling we last asked for on each cluster, 0 if none
+	fanMin  int                // the slowest fan level to allow in games, 1-5; 0 leaves the fan to the vendor
+	fanWas  int                // the fan level found before our first write in this game, 0 if we have not written
+	fanOurs int                // the level we last wrote
 	hold    []int              // for experiments: floors in MHz (prime cores, GPU, other cores) to hold in games instead of running the control law
 }
 
@@ -406,6 +421,9 @@ func (g *governor) apply() {
 			khz = g.cpuFloorKHz(p, g.hold[map[string]int{"policy6": 0, "policy0": 2}[p]])
 		case p != g.hot:
 			khz = g.sideFloor(p, g.c.cpuMHz[g.c.cpu])
+		}
+		if c := g.capKHz[p]; c != 0 {
+			khz = min(khz, c)
 		}
 		if khz != g.floor[p] {
 			g.floor[p], g.since[p] = khz, nil
@@ -470,6 +488,11 @@ func (g *governor) leaveGame() {
 	}
 	g.game = false
 	g.leftAt = time.Now()
+	g.uncap()
+	if g.fanOurs != 0 && readInt(fanDir+"fan_speed_level") == g.fanOurs {
+		write(fanDir+"fan_speed_level", strconv.Itoa(g.fanWas))
+	}
+	g.fanWas, g.fanOurs = 0, 0
 	if !diablo() {
 		for _, p := range policies {
 			write(cpufreq+p+"/scaling_min_freq", strconv.Itoa(g.cpuFreqs[p][0]))
@@ -486,6 +509,55 @@ func (g *governor) leaveGame() {
 	g.c.reset()
 }
 
+// uncap puts our ceiling request on each cluster back at the top of its table,
+// where it limits nothing. The vendor's own limits are separate requests and
+// stay as they are.
+func (g *governor) uncap() {
+	for _, p := range policies {
+		t := g.cpuFreqs[p]
+		write(cpufreq+p+"/scaling_max_freq", strconv.Itoa(t[len(t)-1]))
+	}
+	g.capKHz = map[string]int{}
+}
+
+// cool sets the fan and the CPU ceilings for the board sensor's temperature and
+// the ceiling level it calls for.
+func (g *governor) cool(now time.Time, xoC float64, level int) {
+	if g.fanMin != 0 && read(fanDir+"fan_enable") == "1" { // off means the user switched the game fan off
+		// The vendor raises the level by itself when the tablet is hot; only a slower one is replaced.
+		if cur := readInt(fanDir + "fan_speed_level"); cur < g.fanMin {
+			if g.fanWas == 0 {
+				g.fanWas = cur
+			}
+			write(fanDir+"fan_speed_level", strconv.Itoa(g.fanMin))
+			log.Printf("fan level %d (was %d) at %.1f C", g.fanMin, cur, xoC)
+			g.fanOurs = g.fanMin
+		}
+	}
+	for _, p := range policies {
+		t, cut := g.cpuFreqs[p], firstCut[p]
+		// Each cluster gives up the same share of the way down to the vendor's first cut.
+		steps := 0
+		for i := len(t) - 1; i > 0 && t[i] > cut; i-- {
+			steps++
+		}
+		khz := t[len(t)-1-(level*steps+g.heat.max/2)/max(g.heat.max, 1)]
+		if level == 0 {
+			khz = 0
+		}
+		if khz != g.capKHz[p] {
+			if g.capKHz[p] = khz; khz == 0 {
+				khz = t[len(t)-1]
+			}
+			write(cpufreq+p+"/scaling_max_freq", strconv.Itoa(khz))
+			log.Printf("%s ceiling %d MHz at %.1f C (heading for %.1f C)", p, khz/1000, xoC, g.heat.ahead(now))
+		}
+	}
+}
+
+// firstCut is the ceiling the vendor's thermal cut puts on each cluster at 41 C, kHz.
+var firstCut = map[string]int{"policy0": 2400000, "policy6": 2841600}
+
 // reclaim undoes floors a previous instance left behind if it was killed
 // before it could restore them. Outside Diablo, which pins both, nothing else
 // on this tablet raises a cluster's minimum or keeps the GPU floor above the
@@ -495,6 +567,7 @@ func (g *governor) reclaim() {
 	if diablo() {
 		return
 	}
+	g.uncap() // our ceiling request cannot be read back by itself, and at the top it limits nothing
 	for _, p := range policies {
 		if bottom := g.cpuFreqs[p][0]; readInt(cpufreq+p+"/scaling_min_freq") > bottom {
 			log.Printf("%s minimum was left raised; restoring", p)
@@ -562,12 +635,32 @@ func (g *governor) step() {
 		log.Printf("game scene off")
 	}
 	st := status{Time: now.Format(time.RFC3339), Enabled: g.enabled, Game: g.game}
-	st.SkinC, st.BattC = float64(readInt(skinZone()))/1000, float64(readInt("/sys/class/power_supply/battery/temp"))/10
+	st.SkinC, st.BattC = float64(readInt(zone("skin-msm-therm")))/1000, float64(readInt("/sys/class/power_supply/battery/temp"))/10
+	st.XoC = float64(readInt(zone("xo-therm"))) / 1000
+	// The ceiling level follows the sensor between games too: it is still there
+	// for a game that is left for a moment, and gone once the tablet has cooled.
+	if g.heat.level == 0 {
+		// With no ceiling of ours in the way, both clusters open to the top of their
+		// tables means Rise with the vendor's cut off: the one place this acts.
+		g.heat.target = g.heatC
+		for _, p := range policies {
+			if t := g.cpuFreqs[p]; readInt(cpufreq+p+"/scaling_max_freq") < t[len(t)-1] {
+				g.heat.target = 0
+			}
+		}
+	}
+	saving := g.heat.saving
+	st.HeatLevel = g.heat.step(now, st.XoC)
+	if st.HeatSaving = g.heat.saving; saving != g.heat.saving && g.game {
+		log.Printf("giving up spare GPU floor: %v at %.1f C", g.heat.saving, st.XoC)
+	}
 	if !g.game {
 		g.repin()
 		g.st = st
 		return
 	}
+	g.cool(now, st.XoC, st.HeatLevel)
+	st.FanLevel = readInt(fanDir + "fan_speed_level")
 	g.applyRatchet()
 	g.f.poll()
 
@@ -671,7 +764,7 @@ func (g *governor) step() {
 	if g.hold == nil {
 		action = g.c.step(sample{now: now, flowing: flowing, fps: fps, fps6: fps6, fpsNow: fpsNow, panelHz: panelHz,
 			gpuBusy: gpuBusy, hotBusy: hotBusy, cpuNow: cpuNow, gpuNow: gpuNow, demand: demand,
-			lockK: g.f.curHold, lockedFor: lockedFor, cpuLimit: cpuLimit, gpuLimit: gpuLimit})
+			lockK: g.f.curHold, lockedFor: lockedFor, cpuLimit: cpuLimit, gpuLimit: gpuLimit, thrifty: g.heat.saving})
 	} else {
 		g.c.cpu, g.c.gpu = 0, 0
 		for i, f := range g.c.cpuMHz[:cpuLimit+1] {
@@ -711,20 +804,20 @@ func (g *governor) step() {
 	g.st = st
 }
 
-var skinPath string
+var zonePaths = map[string]string{}
 
-// skinZone finds the thermal zone the vendor's own throttling watches.
-func skinZone() string {
-	if skinPath == "" {
-		skinPath = "/dev/null"
+// zone finds a thermal zone's temperature file by the zone's type.
+func zone(name string) string {
+	if zonePaths[name] == "" {
+		zonePaths[name] = "/dev/null"
 		zones, _ := filepath.Glob("/sys/class/thermal/thermal_zone*/type")
 		for _, z := range zones {
-			if read(z) == "skin-msm-therm" {
-				skinPath = filepath.Join(filepath.Dir(z), "temp")
+			if read(z) == name {
+				zonePaths[name] = filepath.Join(filepath.Dir(z), "temp")
 			}
 		}
 	}
-	return skinPath
+	return zonePaths[name]
 }
 
 // logFile appends to a file and starts a new one when it reaches 2 MB, keeping
@@ -761,12 +854,15 @@ func main() {
 	monitor := flag.Bool("monitor", false, "start with control disabled (observe only)")
 	logPath := flag.String("log", "", "write the log to this file, keeping one previous file, instead of stderr")
 	hold := flag.String("hold", "", "for experiments: hold these floors in games (\"cpuMHz,gpuMHz[,otherCoresMHz]\": the first is for the prime cores, and for the rest unless a third is given) instead of running the control law")
+	fanMin := flag.Int("fan", 0, "the slowest fan level to allow in games, 1-5 (the vendor runs 2 until the tablet is hot); 0 leaves the fan to the vendor")
+	heatC := flag.Float64("heat", 0, "in Rise, hold the board sensor (xo-therm) at or under this many C by giving up spare GPU floor and then CPU ceilings a step at a time; the vendor cuts the ceilings hard at 49. 0 leaves both alone")
 	flag.Parse()
 	if *logPath != "" {
 		log.SetOutput(&logFile{path: *logPath})
 	}
 
-	g := &governor{enabled: !*monitor, stock: map[string]string{}, cpuFreqs: map[string][]int{}}
+	g := &governor{enabled: !*monitor, stock: map[string]string{}, cpuFreqs: map[string][]int{}, fanMin: *fanMin}
+	g.heatC = *heatC
 	if *hold != "" {
 		g.hold = []int{0, 0, 0}
 		if n, _ := fmt.Sscanf(*hold, "%d,%d,%d", &g.hold[0], &g.hold[1], &g.hold[2]); n < 2 {
@@ -811,6 +907,10 @@ func main() {
 		}
 	}
 
+	// One step of ceiling per entry of the prime cores' table down to the vendor's first cut.
+	for t, i := g.cpuFreqs["policy6"], len(g.cpuFreqs["policy6"])-1; i > 0 && t[i] > firstCut["policy6"]; i-- {
+		g.heat.max++
+	}
 	g.reclaim()
 
 	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
@@ -835,7 +935,7 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	busyTick := time.NewTicker(100 * time.Millisecond)
 	stepTick := time.NewTicker(tick)
-	log.Printf("astrad2 up: cpu floors %v MHz, gpu floors %v MHz, control=%v", cpuMHz, gpuMHz, g.enabled)
+	log.Printf("astrad2 up: cpu floors %v MHz, gpu floors %v MHz, control=%v, fan=%d, heat=%v C in %d steps", cpuMHz, gpuMHz, g.enabled, g.fanMin, g.heatC, g.heat.max)
 	for {
 		select {
 		case <-sig:

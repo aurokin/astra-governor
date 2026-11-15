@@ -6,6 +6,7 @@ until [ "$(getprop sys.boot_completed)" = 1 ]; do sleep 2; done
 sleep 15
 mkdir -p /data/adb/astra
 while [ ! -e "$MODDIR/disable" ] && [ ! -e "$MODDIR/remove" ]; do
-  "$MODDIR/astrad2" -listen 127.0.0.1:7878 -log /data/adb/astra/astrad2.log
+  # -heat 48: in Rise, stay a degree under the board temperature at which the vendor cuts the CPU ceilings.
+  "$MODDIR/astrad2" -listen 127.0.0.1:7878 -log /data/adb/astra/astrad2.log -heat 48
   sleep 5
 done
