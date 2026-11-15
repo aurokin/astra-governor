@@ -56,7 +56,7 @@ type rig struct {
 	limits   [2]int
 	lateTick int
 	locked   time.Duration // how long the delivered rate has sat exactly on a fraction of the panel rate
-	gpuSeen  []float64     // GPU busy shares not yet reported: the kernel's figure trails by about a second
+	gpuSeen  []float64     // GPU busy shares not yet reported: after a change of floors the figure trails by up to three seconds
 	rnd      *rand.Rand
 	hitchAt  time.Time // the game's next own late frame
 	cpuWas   int
@@ -127,7 +127,7 @@ func (r *rig) tick(g game) float64 {
 		k, r.locked = 0, 0
 	}
 	r.gpuSeen = append(r.gpuSeen, gpu)
-	if len(r.gpuSeen) > 3 {
+	if len(r.gpuSeen) > 7 {
 		r.gpuSeen = r.gpuSeen[1:]
 	}
 	a := r.c.step(sample{now: r.now, flowing: true, fps: fps, fps6: sum / float64(len(r.hist)), fpsNow: fpsNow, panelHz: panel, lockK: k, lockedFor: r.locked,

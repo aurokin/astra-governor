@@ -613,7 +613,9 @@ func (g *governor) step() {
 	if seen := policies[min(hotCPU/6, 1)]; hotName == "" || seen == g.hot {
 		g.hotFor = 0
 	} else if g.hotFor++; g.hotFor >= 2 {
-		g.hot, g.hotFor = seen, 0
+		// What the stock governor did on that cluster while it was the idle one
+		// says nothing about what the busiest thread needs there: start counting afresh.
+		g.hot, g.hotFor, g.since = seen, 0, map[string][]table{}
 	}
 	policy := g.hot
 	cpuCur := map[string]table{}

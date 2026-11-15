@@ -123,7 +123,10 @@ const (
 	maxProbe      = 120 * time.Second
 	busyShift     = 0.15 // a change in busy share this large at an unchanged rate means the scene changed
 	settleTicks   = 4    // ticks after a change of floors before busy shares are trusted
-	nearPanel     = 0.97 // content this close to the panel's rate has nothing more to ask for
+	// After a look at ample clocks the GPU's own governor takes two to three
+	// seconds to come back down to the floor, and its busy share with it.
+	refTicks  = 8
+	nearPanel = 0.97 // content this close to the panel's rate has nothing more to ask for
 	// Content on its own clock drifts against the panel and shows an odd hold every
 	// few seconds (3 s for 59.94, 7 s for 30.00 on this 60.27 Hz panel). Frames that
 	// hold exactly the same number of refreshes for this long are locked to the
@@ -394,7 +397,7 @@ func (c *controller) step(s sample) (action string) {
 	}
 	// The GPU's busy figure trails a change of floors by a second or so, so the
 	// reference is taken, and compared against, only once it has caught up.
-	if c.good <= settleTicks {
+	if c.good <= refTicks {
 		c.busyRef, c.busyOff = busy, 0
 	} else if d := busy - c.busyRef; d > busyShift || d < -busyShift {
 		c.busyOff++
