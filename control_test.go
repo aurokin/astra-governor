@@ -72,7 +72,8 @@ type rig struct {
 	hitches  int
 	ampleFor int // ticks spent with both floors at the vendor's limits
 	thrifty  bool
-	gpuSum   int // GPU floor summed over ticks, MHz
+	gpuSum   int  // GPU floor summed over ticks, MHz
+	steady   bool // stream() delivers every frame on time: a light game, not a stream
 }
 
 func newRig() *rig {
@@ -555,5 +556,125 @@ func TestHotBoardLeavesContentBelowThePanelRateAlone(t *testing.T) {
 	}
 	if floors[0] != floors[1] {
 		t.Errorf("ends at floors %v on a hot board and %v on a cool one, want the same", floors[1], floors[0])
+	}
+}
+
+// stream is a stand-in for a game stream: next to no work on the tablet, and a
+// frame rate that wanders with the machine sending it.
+func (r *rig) stream(seconds int, hot, gpu float64) {
+	for i := 0; i < seconds*2; i++ {
+		r.now = r.now.Add(500 * time.Millisecond)
+		fps := 50 + 4*math.Sin(float64(i)/3) - 6*float64(r.rnd.Intn(5)/4)
+		if r.steady {
+			fps = panel
+		}
+		r.hist = append(r.hist, fps)
+		if len(r.hist) > 12 {
+			r.hist = r.hist[1:]
+		}
+		sum := 0.0
+		for _, f := range r.hist {
+			sum += f
+		}
+		// The busy shares are what the work comes to at the clocks the floors give.
+		top := float64(cpuTable[len(cpuTable)-1])
+		a := r.c.step(sample{now: r.now, flowing: true, fps: fps, fps6: sum / float64(len(r.hist)), fpsNow: fps, panelHz: panel,
+			hotBusy: hot * top / float64(cpuTable[r.c.cpu]), gpuBusy: gpu * float64(gpuTable[len(gpuTable)-1]) / float64(gpuTable[r.c.gpu]),
+			cpuNow: cpuTable[r.c.cpu], gpuNow: gpuTable[r.c.gpu], cpuLimit: r.limits[0], gpuLimit: r.limits[1]})
+		r.actions = append(r.actions, a)
+		if r.c.cpu == r.limits[0] && r.c.gpu == r.limits[1] {
+			r.ampleFor++
+		}
+	}
+}
+
+func TestStreamWhoseRateWandersIsNotHeldAtAmpleClocks(t *testing.T) {
+	r := newRig()
+	r.stream(10, 0.02, 0.002) // the decoder's thread 2% busy at the top clock, the GPU all but idle
+	r.ampleFor, r.actions = 0, nil
+	r.stream(300, 0.02, 0.002)
+	if r.ampleFor != 0 {
+		t.Errorf("at ample clocks for %d of 600 half-seconds on a stream", r.ampleFor)
+	}
+	if got := [2]int{cpuTable[r.c.cpu], gpuTable[r.c.gpu]}; got != [2]int{1363, 222} {
+		t.Errorf("floors %v MHz, want the resting clock and the lowest GPU floor", got)
+	}
+	if n := r.count("rescue") + r.count("relearn") + r.count("probe") + r.count("undo"); n != 0 {
+		t.Errorf("%d rescues, probes and undone steps on content whose lateness is not the clocks' doing: %v", n, r.actions)
+	}
+}
+
+func TestGameThatStartsBehindALightMenuGetsAmpleClocksAtOnce(t *testing.T) {
+	r := newRig()
+	r.stream(20, 0.02, 0.002)
+	if !r.c.light {
+		t.Fatal("a menu this light was not recognised")
+	}
+	g := game{cpuMs: 6, gpuMs: 4, fps: 59.94}
+	r.tick(g)
+	if r.c.cpu != r.limits[0] || r.c.gpu != r.limits[1] {
+		t.Fatalf("floors %d/%d MHz one tick after the game began, want the limits", cpuTable[r.c.cpu], gpuTable[r.c.gpu])
+	}
+	r.lateTick = 0
+	if fps := r.run(g, 120); fps != 59.94 || r.lateTick > 2 {
+		t.Errorf("%.2f fps with %d late half-seconds once the game runs, want 59.94 and at most the one undone step", fps, r.lateTick)
+	}
+	if r.c.light {
+		t.Error("a game with real work is still being treated as light")
+	}
+}
+
+func TestContentJustUnderTheLineDoesNotGoInAndOutOfLight(t *testing.T) {
+	// 5% of the top clock is 11% at the resting one; every tenth second it is three times that.
+	r := newRig()
+	r.steady = true
+	for i := 0; i < 60; i++ {
+		r.stream(9, 0.05, 0.002)
+		r.stream(1, 0.15, 0.002)
+	}
+	if n := r.count("light"); n > 5 {
+		t.Errorf("called light %d times in ten minutes, each followed by a look at ample clocks", n)
+	}
+}
+
+func TestHeavierStreamIsRecognisedByLatenessTheClocksDoNotCure(t *testing.T) {
+	// 8% of the top clock is 17% at the resting one: over the line for content that is merely light.
+	r := newRig()
+	r.stream(60, 0.08, 0.002)
+	if !r.c.light || !r.c.adrift {
+		t.Fatalf("after a minute of a wandering rate that ample clocks did not steady: light=%v adrift=%v, floors %d/%d MHz",
+			r.c.light, r.c.adrift, cpuTable[r.c.cpu], gpuTable[r.c.gpu])
+	}
+	r.ampleFor = 0
+	r.stream(300, 0.08, 0.002)
+	if r.ampleFor != 0 || !r.c.light {
+		t.Errorf("left its resting clocks for %d of 600 half-seconds (light=%v)", r.ampleFor, r.c.light)
+	}
+}
+
+func TestSteadyGameWithThatMuchWorkIsNotCalledLight(t *testing.T) {
+	// The same 8% from a game that is on time: nothing says its frames are made elsewhere.
+	g := game{cpuMs: 1.33, gpuMs: 0.2, fps: 59.94}
+	r := newRig()
+	r.run(g, 180)
+	if r.c.light || r.count("light") != 0 {
+		t.Errorf("a game that holds its rate was called light (%d times)", r.count("light"))
+	}
+}
+
+func TestTargetCountedHighIsCorrectedNotHeldAtAmpleClocks(t *testing.T) {
+	g := game{cpuMs: 6, gpuMs: 4, fps: 59.94}
+	r := newRig()
+	r.run(g, 3) // past the two seconds of learning, so the target below is not replaced at once
+	// The one-second count the target was set from had a frame too many: under 2.5% high, so no
+	// single second looks late, and over 1.1%, so every six seconds do.
+	r.c.target, r.c.rough, r.c.fast = 61.0, true, false
+	r.c.cpu, r.c.gpu = r.limits[0], r.limits[1]
+	r.run(g, 90)
+	if math.Abs(r.c.target-59.94) > 0.3 {
+		t.Fatalf("target %.2f after ninety seconds of a steady 59.94, want that", r.c.target)
+	}
+	if r.c.cpu == r.limits[0] && r.c.gpu == r.limits[1] {
+		t.Errorf("still at ample clocks: nothing was economised")
 	}
 }

@@ -81,6 +81,16 @@ type controller struct {
 	trialBase   [2]int        // floors before the first trial step
 	lastDownWas bool          // the last step down was a trial
 
+	// Content whose own work is a sliver of a frame: a game stream, whose frames
+	// are made on another machine, or a menu. See lightShare.
+	light      bool
+	lightRun   int           // consecutive ticks on which the work was that small
+	lightAfter time.Time     // it turned out not to be: do not call this content light again before then
+	lightWait  time.Duration // how long that lasts; doubles each time it happens again
+	ampleSince time.Time     // since when both floors have been at their limits; zero if they are not
+	topLate    []time.Time   // recent late ticks with both floors at their limits: lateness the clocks did not cause
+	adrift     bool          // called light on the strength of those, under the wider limit (driftShare)
+
 	// Steps down are judged against the heaviest recent moment, not the current
 	// one, so a scene that is heavy now and then keeps the clocks it needs then.
 	recent []work
@@ -147,6 +157,41 @@ const (
 	// How long the CPU floor must have sat at its limit to count as staying there.
 	// After a rescue the law leaves it within six seconds if anything lower will do.
 	cpuTopFor = 10 * time.Second
+	// How long both floors must have been at their limits before the six-second
+	// rate is taken as the content's own: its six seconds and the second or two
+	// the GPU's own governor needs to follow a raised floor.
+	roughFor = 8 * time.Second
+
+	// An app whose busiest thread would be busy less than this share of the time
+	// at restMHz, and whose GPU would be at the GPU's lowest floor, is not being
+	// held up by either clock, whatever its frames do. A stream played by Artemis
+	// is the case in point: the decoder's thread is busy 2-7%, the frame rate
+	// wanders between 46 and 54 with the host and the network, and the law above
+	// read every dip as starvation and sat at the top clocks for a watt (4.0 W
+	// against the vendor's 3.0 W) and not one more frame. Such content gets
+	// restMHz and the GPU's lowest floor, and its late frames are held against
+	// nothing. The lightest emulated game staged (Super Mario World) is at 17%.
+	lightShare = 0.15
+	lightTicks = 6 // three seconds of it before the content is called light
+	// Content just under the line crosses it now and then, and each time costs a
+	// look at ample clocks: Super Mario World and Metroid Fusion went in and out
+	// every few seconds. Once content has left, it is not called light again for
+	// this long, twice as long each time, and the rest of the law has it meanwhile.
+	lightAgain = time.Minute
+	// Seen from ample clocks a stream's work looks two or three times what it
+	// comes to at the resting clock (a 1440p stream at 120 fps: 11-18% against
+	// 6%), part of it because a thread's busy share is counted in steps of 2%.
+	// lightShare alone then lets it in and out. Content that is late again and
+	// again with both floors at their limits has shown that its lateness is not
+	// the clocks' doing, and for that content the limit is this wider one. A game
+	// let in by mistake still fills under a third of a frame at the resting clock.
+	driftShare = 0.30
+	driftLate  = 4                // late ticks at the limits ...
+	driftFor   = 30 * time.Second // ... within this long
+	// Below this the stock CPU governor is slow to leave its low clocks for work
+	// that comes in a short burst per frame: outside games, played video lost a
+	// frame a second at 570 MHz and a fifth of that from 1152 MHz up.
+	restMHz = 1152
 )
 
 // sample is one tick of measurements for the app in front.
@@ -187,7 +232,7 @@ func newController(cpuMHz, gpuMHz []int) *controller {
 
 func (c *controller) reset() {
 	*c = controller{cpuMHz: c.cpuMHz, gpuMHz: c.gpuMHz,
-		holdUntil: map[[2]int]time.Time{}, failed: map[[2]int][]time.Time{}, probeEvery: firstProbe, memory: firstMemory, turnsWait: turnsFor, spendWait: spendFor}
+		holdUntil: map[[2]int]time.Time{}, failed: map[[2]int][]time.Time{}, probeEvery: firstProbe, memory: firstMemory, turnsWait: turnsFor, spendWait: spendFor, lightWait: lightAgain}
 }
 
 func (c *controller) enter(s state, now time.Time) {
@@ -310,12 +355,63 @@ func (c *controller) step(s sample) (action string) {
 		// comes next may be a different scene, so it starts with a fresh look.
 		if c.idle++; c.idle >= idleTicks && c.state != idle {
 			c.cpu, c.gpu = 0, 0
+			c.light, c.lightRun, c.lightAfter, c.lightWait, c.topLate = false, 0, time.Time{}, lightAgain, nil
 			c.enter(idle, s.now)
 		}
 		return "idle"
 	}
 	c.idle = 0
 	c.ticks++
+	if c.cpu < s.cpuLimit || c.gpu < s.gpuLimit {
+		c.ampleSince = time.Time{}
+	} else if c.ampleSince.IsZero() {
+		c.ampleSince = s.now
+	}
+
+	rest := 0
+	for rest < s.cpuLimit && c.cpuMHz[rest] < restMHz {
+		rest++
+	}
+	for len(c.topLate) > 0 && s.now.Sub(c.topLate[0]) > driftFor {
+		c.topLate = c.topLate[1:]
+	}
+	limit := lightShare
+	if len(c.topLate) >= driftLate || (c.light && c.adrift) {
+		limit = driftShare
+	}
+	if s.cpuNow > 0 {
+		// A GPU that was switched off for the whole tick reports no clock: no work.
+		// The stock governor climbing well above the resting clock (demand) means
+		// bursts that an average share does not show: not light either.
+		if s.hotBusy*float64(s.cpuNow)/float64(c.cpuMHz[rest]) < limit && s.gpuBusy*float64(s.gpuNow)/float64(c.gpuMHz[0]) < limit &&
+			!(c.light && s.demand > c.cpuMHz[rest]) {
+			c.lightRun++
+		} else {
+			c.lightRun = 0
+		}
+	}
+	switch {
+	case c.lightRun >= lightTicks && (limit == driftShare || !s.now.Before(c.lightAfter)):
+		was := c.light
+		if !was {
+			c.adrift = limit == driftShare
+			c.enter(track, s.now)
+		}
+		// The target is only what the status shows here: nothing is judged against it.
+		c.light, c.cpu, c.gpu, c.target = true, rest, 0, s.fps6
+		if !was {
+			return "light"
+		}
+		return ""
+	case c.light:
+		// It has work to do after all (the game behind the menu started): look afresh.
+		c.light, c.topLate = false, nil
+		c.lightAfter = s.now.Add(c.lightWait)
+		c.lightWait = min(c.lightWait*2, maxMemory)
+		c.cpu, c.gpu = s.cpuLimit, s.gpuLimit
+		c.enter(learn, s.now)
+		return "learn"
+	}
 
 	switch c.state {
 	case idle:
@@ -394,11 +490,22 @@ func (c *controller) step(s sample) (action string) {
 			c.gpu = gpuAllowed
 			return "rescue-gpu"
 		case c.cpu >= s.cpuLimit && c.gpu >= s.gpuLimit:
+			c.topLate = append(c.topLate, s.now)
 			if c.lateRun >= 4 {
 				// Late for two seconds running with nothing more to give: the content
 				// itself slowed down. Find out what it wants now.
 				c.enter(learn, s.now)
 				return "relearn"
+			}
+			if c.rough && !c.ampleSince.IsZero() && s.now.Sub(c.ampleSince) >= roughFor {
+				// The target is still the one-second count it was set from, and that
+				// count came out high (62 frames where the game makes 60.3: seen about
+				// once in fifty). Against it the six-second rate is short for ever, so
+				// the on-time stretch that would replace it never comes and the floors
+				// never leave their limits. Everything shown since they got there is
+				// what the content does with ample clocks: take that.
+				c.target, c.rough = s.fps6, false
+				return fmt.Sprintf("target-%.1f", c.target)
 			}
 			// A late frame with nothing more to give is the game's own.
 			return "uneven"

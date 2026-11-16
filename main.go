@@ -107,6 +107,7 @@ type frames struct {
 	curHold  int   // refreshes the most recent frame was held for
 	holdFrom int64 // present time since which every frame has held curHold refreshes
 	stale    int   // polls in a row that brought nothing new
+	picked   time.Time
 }
 
 var layerRe = regexp.MustCompile(`RequestedLayerState\{(.*?#\d+)(?: parentId=| relativeParentId=| z=|\})`)
@@ -128,10 +129,14 @@ func latency(layer string) []int64 {
 	return res
 }
 
-// pick chooses the layer presenting most recently, preferring the package the
-// vendor says the game scene belongs to. Surfaces are recreated on resume and
-// on some scene changes, so this runs again whenever the current one goes quiet.
+// pick chooses the layer that presented most frames in its last second,
+// preferring the package the vendor says the game scene belongs to. Surfaces
+// are recreated on resume and on some scene changes, so this runs again
+// whenever the current one goes quiet. The newest frame alone is no guide: an
+// app's own readout drawn over the picture (Artemis's statistics, once a
+// second) is a layer of the same package and as recent as any.
 func (f *frames) pick() {
+	f.picked = time.Now()
 	pkg := strings.TrimSpace(run(2*time.Second, "/system/bin/settings", "get", "system", "nubia_game_scene_package_name"))
 	var mine, others []string
 	for _, m := range layerRe.FindAllStringSubmatch(run(2*time.Second, "/system/bin/dumpsys", "SurfaceFlinger", "--list"), -1) {
@@ -145,10 +150,15 @@ func (f *frames) pick() {
 	if len(mine) == 0 {
 		mine = others
 	}
-	best, newest := "", int64(0)
+	best, most, now := "", 0, monoNs()
 	for _, l := range mine {
-		if p := latency(l); len(p) > 0 && p[len(p)-1] > newest {
-			best, newest = l, p[len(p)-1]
+		p := latency(l)
+		if len(p) == 0 || p[len(p)-1] < now-3e9 {
+			continue // nothing shown for three seconds: not what is on screen
+		}
+		n := len(p) - sort.Search(len(p), func(i int) bool { return p[i] >= p[len(p)-1]-1e9 })
+		if n > most {
+			best, most = l, n
 		}
 	}
 	if best != "" && best != f.layer {
@@ -165,7 +175,13 @@ func (f *frames) poll() {
 			}
 		}
 	}
-	if f.layer == "" || f.stale >= 3 {
+	// A layer that shows a frame or two a second is either a paused game or the
+	// wrong layer; every few seconds, see whether another has more to show.
+	slow := false
+	if _, n := f.rate(time.Second); n < 5 && time.Since(f.picked) > 5*time.Second {
+		slow = true
+	}
+	if f.layer == "" || f.stale >= 3 || slow {
 		f.pick()
 		f.stale = 0
 	}
@@ -383,6 +399,7 @@ type governor struct {
 	fanOurs int                // the level we last wrote
 	hold    []int              // for experiments: floors in MHz (prime cores, GPU, other cores) to hold in games instead of running the control law
 	base    int                // the performance cores' minimum outside games while the screen is on, kHz; 0 leaves it to the vendor
+	rested  bool               // that minimum is in place and it was this instance that put it there
 }
 
 // gpuIndexToLevel maps the controller's ascending GPU table onto KGSL levels:
@@ -527,9 +544,10 @@ func (g *governor) leaveGame() {
 // back to when a browser sits untouched, it loses a fifth of that for no power
 // that could be measured.
 //
-// It only ever raises a minimum that is below -base and only lowers one that
-// is exactly -base, so a minimum someone else holds higher (Diablo pins it to
-// the top) is never touched.
+// It only ever raises a minimum that is below -base, and only lowers one that
+// it raised itself and that still reads -base. A minimum someone else holds
+// (Diablo pins it to the top; a second instance under test may hold this very
+// clock) is never touched.
 func (g *governor) rest(on bool) {
 	if g.base == 0 {
 		return
@@ -538,8 +556,11 @@ func (g *governor) rest(on bool) {
 	switch cur := readInt(path); {
 	case on && cur < g.base:
 		write(path, strconv.Itoa(g.base))
-	case !on && cur == g.base:
-		write(path, strconv.Itoa(g.cpuFreqs[policies[0]][0]))
+		g.rested = true
+	case !on && g.rested:
+		if g.rested = false; cur == g.base {
+			write(path, strconv.Itoa(g.cpuFreqs[policies[0]][0]))
+		}
 	}
 }
 
