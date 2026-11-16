@@ -38,6 +38,7 @@ type controller struct {
 	ticks      int     // ticks spent in the current state
 	target     float64 // the rate the content reached with ample clocks
 	fast       bool    // descending quickly after a look at ample clocks
+	clean      bool    // no frame has been late since that look
 	good       int     // consecutive on-time ticks while tracking
 	above      int     // consecutive ticks the game ran faster than the target
 	idle       int
@@ -45,6 +46,11 @@ type controller struct {
 	lastDown   time.Time
 	lastDownTo [2]int
 	undo       [2]int
+	// The step before the last, while it is close enough behind it that a late
+	// frame could be either's doing (see cleanDownTicks).
+	prevDown   time.Time
+	prevUndo   [2]int
+	downAt     [2]time.Time           // when the CPU floor and the GPU floor were last lowered
 	holdUntil  map[[2]int]time.Time   // do not step down to these floors before then
 	failed     map[[2]int][]time.Time // when each setting failed, within maxMemory
 	nextProbe  time.Time
@@ -132,18 +138,29 @@ const (
 	fasterBy      = 0.025 // running this far above the target means the content sped up
 	slowDownTicks = 20    // on-time ticks before a careful step down
 	fastDownTicks = 2     // the same while descending after a look at ample clocks
-	slack         = 0.80  // a step down must leave the predicted busy share below this
-	overlap       = 1.10  // CPU and GPU busy shares adding up past this cannot be taking turns
-	overlapTicks  = 3
-	turnsFor      = 10 * time.Minute // how long a failed trial rules out further ones, at first
-	turnsMax      = 80 * time.Minute
-	firstMemory   = time.Minute
-	maxMemory     = 16 * time.Minute
-	idleTicks     = 10
-	firstProbe    = 20 * time.Second
-	maxProbe      = 120 * time.Second
-	busyShift     = 0.15 // a change in busy share this large at an unchanged rate means the scene changed
-	settleTicks   = 4    // ticks after a change of floors before busy shares are trusted
+	// A game whose busy shares add up past the take-turns limit at ample clocks
+	// has no quick step down: SuperTuxKart going from its menu into a race at
+	// 165 Hz took thirteen careful ones, 130 s at 11.6 W where the vendor alone
+	// drew 8.9 W. What a careful step waits ten seconds for is its own floor's
+	// signal: the stock CPU governor climbing above a new CPU floor, the GPU's
+	// busy share catching up with a new GPU floor. Neither says anything about
+	// the other floor, so until a frame is late after a look at ample clocks the
+	// two may take turns, a step of one this long after a step of the other and
+	// still slowDownTicks after its own last. A late frame that follows two such
+	// steps undoes both.
+	cleanDownTicks = 10
+	slack          = 0.80 // a step down must leave the predicted busy share below this
+	overlap        = 1.10 // CPU and GPU busy shares adding up past this cannot be taking turns
+	overlapTicks   = 3
+	turnsFor       = 10 * time.Minute // how long a failed trial rules out further ones, at first
+	turnsMax       = 80 * time.Minute
+	firstMemory    = time.Minute
+	maxMemory      = 16 * time.Minute
+	idleTicks      = 10
+	firstProbe     = 20 * time.Second
+	maxProbe       = 120 * time.Second
+	busyShift      = 0.15 // a change in busy share this large at an unchanged rate means the scene changed
+	settleTicks    = 4    // ticks after a change of floors before busy shares are trusted
 	// After a look at ample clocks the GPU's own governor takes two to three
 	// seconds to come back down to the floor, and its busy share with it.
 	refTicks  = 8
@@ -492,7 +509,7 @@ func (c *controller) step(s sample) (action string) {
 		if c.ticks < learnTicks {
 			return "learning"
 		}
-		c.target, c.fast, c.probeEvery, c.confirmedLock = s.fps, true, firstProbe, 0
+		c.target, c.fast, c.clean, c.probeEvery, c.confirmedLock = s.fps, true, true, firstProbe, 0
 		c.nextProbe = s.now.Add(c.probeEvery)
 		c.enter(track, s.now)
 		c.rough = true
@@ -505,7 +522,7 @@ func (c *controller) step(s sample) (action string) {
 		}
 		if s.fps > c.target*(1+fasterBy) {
 			// The content had more to give: it was being held on a lower rate.
-			c.target, c.fast, c.probeEvery, c.confirmedLock = s.fps, true, firstProbe, 0
+			c.target, c.fast, c.clean, c.probeEvery, c.confirmedLock = s.fps, true, true, firstProbe, 0
 			c.rough = true
 			action = fmt.Sprintf("probe-found-%.1f", c.target)
 		} else {
@@ -546,7 +563,7 @@ func (c *controller) step(s sample) (action string) {
 	} else {
 		c.lateRun++
 		c.lateSince, c.deaf = s.now, deafTicks
-		c.good, c.fast = 0, false
+		c.good, c.fast, c.clean = 0, false, false
 		switch {
 		case c.cpu >= s.cpuLimit && c.gpu >= s.gpuLimit && s.gpuLimit < gpuAllowed && c.lateRun >= 2:
 			// Late for a second running with GPU floor held back: the busy shares were
@@ -582,6 +599,12 @@ func (c *controller) step(s sample) (action string) {
 			// alone for a while, longer each time it fails.
 			c.fail(c.lastDownTo, s.now)
 			c.cpu, c.gpu = c.undo[0], c.undo[1]
+			if c.lastDown.Sub(c.prevDown) < slowDownTicks*500*time.Millisecond {
+				// The other floor was lowered just before, and its signal had not had its
+				// time either: that step goes too.
+				c.fail(c.undo, s.now)
+				c.cpu, c.gpu = c.prevUndo[0], c.prevUndo[1]
+			}
 			if c.lastDownWas {
 				// The trial found the edge, so this thread and the GPU take turns. Go
 				// back to where the trials began: the settings in between hold the
@@ -605,7 +628,7 @@ func (c *controller) step(s sample) (action string) {
 		}
 		c.memory = min(c.memory*2, maxMemory)
 		c.cpu, c.gpu = s.cpuLimit, s.gpuLimit
-		c.trial, c.fast, c.rest = false, true, s.now.Add(restFor)
+		c.trial, c.fast, c.clean, c.rest = false, true, true, s.now.Add(restFor)
 		return "rescue-late"
 	}
 
@@ -662,8 +685,11 @@ func (c *controller) step(s sample) (action string) {
 		return "probe"
 	}
 	need := slowDownTicks
-	if c.fast {
+	switch {
+	case c.fast:
 		need = fastDownTicks
+	case c.clean:
+		need = cleanDownTicks
 	}
 	if c.good < need || s.now.Before(c.rest) {
 		return ""
@@ -683,12 +709,13 @@ func (c *controller) step(s sample) (action string) {
 		return cpuWork * c.target / float64(c.cpuMHz[to[0]]), gpuWork * c.target / float64(c.gpuMHz[to[1]])
 	}
 	var cands []cand
-	if c.cpu > 0 && c.cpuMHz[c.cpu-1] >= demand {
+	own := func(i int) bool { return c.fast || s.now.Sub(c.downAt[i]) >= slowDownTicks*500*time.Millisecond }
+	if c.cpu > 0 && c.cpuMHz[c.cpu-1] >= demand && own(0) {
 		to := [2]int{c.cpu - 1, c.gpu}
 		hot, gpu := share(to)
 		cands = append(cands, cand{to, hot, gpu, fmt.Sprintf("cpu%d", c.cpuMHz[to[0]])})
 	}
-	if c.gpu > 0 {
+	if c.gpu > 0 && own(1) {
 		to := [2]int{c.cpu, c.gpu - 1}
 		hot, gpu := share(to)
 		cands = append(cands, cand{to, hot, gpu, fmt.Sprintf("gpu%d", c.gpuMHz[to[1]])})
@@ -711,13 +738,21 @@ func (c *controller) step(s sample) (action string) {
 		}
 	}
 	if best < 0 || (bestTrial && c.fast) {
-		c.fast = false // nothing safe left to lower quickly: the rest goes one careful step at a time
+		if c.fast || len(cands) == 2 {
+			c.fast = false // nothing safe left to lower quickly: the rest goes one careful step at a time
+		}
 		return ""
 	}
 	if bestTrial && !c.trial {
 		c.trial, c.trialBase = true, [2]int{c.cpu, c.gpu}
 	}
+	c.prevDown, c.prevUndo = c.lastDown, c.undo
 	c.undo = [2]int{c.cpu, c.gpu}
+	if cands[best].to[0] < c.cpu {
+		c.downAt[0] = s.now
+	} else {
+		c.downAt[1] = s.now
+	}
 	c.cpu, c.gpu = cands[best].to[0], cands[best].to[1]
 	c.lastDown, c.lastDownTo, c.lastDownWas = s.now, cands[best].to, bestTrial
 	c.good = 0

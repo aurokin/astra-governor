@@ -462,19 +462,30 @@ func TestHeavyStretchesAreStillCarriedInAGameThatDropsFramesByItself(t *testing.
 // seconds that only 2745 MHz absorbs. Busy shares do not show the bursts; the
 // stock governor climbing for them does.
 func TestBurstsTheStockGovernorClimbsForAreMetByTheFloor(t *testing.T) {
-	g := game{cpuMs: 4, gpuMs: 3, fps: 59.94, burstMHz: 2745, burstEvery: 15 * time.Second}
-	r := newRig()
-	r.run(g, 30*60)
 	// Looks below 2745 MHz come at most every 1, 2, 4, 8 and then 16 minutes, and
 	// only a burst in the first seconds of one arrives before the floor is back.
-	if r.hitches > 2 {
-		t.Errorf("%d of 120 bursts arrived late, want the floor to stay where the stock governor reached", r.hitches)
+	// Whether one does is a matter of how the bursts fall against the looks (0 to
+	// 5 in a half-hour as the interval goes from 11 to 23 s), so it is counted
+	// over several intervals and starts.
+	late, runs := 0, 0
+	for _, every := range []time.Duration{13, 15, 17, 19} {
+		for shift := 0; shift < 3; shift++ {
+			g := game{cpuMs: 4, gpuMs: 3, fps: 59.94, burstMHz: 2745, burstEvery: every * time.Second}
+			r := newRig()
+			r.run(game{cpuMs: 4, gpuMs: 3, fps: 59.94}, 2*shift) // the same game before its bursts begin
+			r.hitches = 0
+			r.run(g, 30*60)
+			late, runs = late+r.hitches, runs+1
+			if got := cpuTable[r.c.cpu]; got != 2745 {
+				t.Errorf("a burst every %d s: CPU floor %d MHz after half an hour, want the 2745 the bursts need and no more", every, got)
+			}
+			if got := gpuTable[r.c.gpu]; got > 443 {
+				t.Errorf("a burst every %d s: GPU floor %d MHz: bursts on the CPU side kept the GPU clock up too", every, got)
+			}
+		}
 	}
-	if got := cpuTable[r.c.cpu]; got != 2745 {
-		t.Errorf("CPU floor %d MHz after half an hour, want the 2745 the bursts need and no more", got)
-	}
-	if got := gpuTable[r.c.gpu]; got > 443 {
-		t.Errorf("GPU floor %d MHz: bursts on the CPU side kept the GPU clock up too", got)
+	if late > 2*runs {
+		t.Errorf("%d bursts arrived late in %d half-hours, want two a half-hour at most: the floor is to stay where the stock governor reached", late, runs)
 	}
 }
 
@@ -753,5 +764,40 @@ func TestGameThatHoldsItsRateWithAFullGPUIsStillJudgedByItsFrames(t *testing.T) 
 	}
 	if r.c.target != 30 {
 		t.Errorf("target %.1f, want the 30 fps it holds", r.c.target)
+	}
+}
+
+// A game whose busy shares add up past the take-turns limit already at ample
+// clocks, so every step down is a trial, and which in fact holds its rate all
+// the way down (its CPU and GPU work side by side).
+func TestCleanDescentTakesItsCPUAndGPUStepsInTurn(t *testing.T) {
+	g := game{cpuMs: 7, gpuMs: 7.5, fps: panel, sideBySide: true}
+	long := newRig()
+	long.run(g, 300)
+	end := [2]int{cpuTable[long.c.cpu], gpuTable[long.c.gpu]}
+	if end[0] >= cpuTable[len(cpuTable)-1] || end[1] >= gpuTable[len(gpuTable)-1] {
+		t.Fatalf("floors %v MHz after five minutes: the game was to be one that comes down", end)
+	}
+	r := newRig()
+	r.run(g, 2)
+	r.lateTick = 0        // the first half-second of any game is counted late
+	var last [2]time.Time // when each floor was last lowered
+	for i := 0; i < 96; i++ {
+		was := [2]int{r.c.cpu, r.c.gpu}
+		r.tick(g)
+		for k, now := range [2]int{r.c.cpu, r.c.gpu} {
+			if now < was[k] {
+				if gap := r.now.Sub(last[k]); !last[k].IsZero() && gap < 10*time.Second {
+					t.Errorf("%s floor lowered twice within %v: each floor's own signal needs its ten seconds", [2]string{"CPU", "GPU"}[k], gap)
+				}
+				last[k] = r.now
+			}
+		}
+	}
+	if got := [2]int{cpuTable[r.c.cpu], gpuTable[r.c.gpu]}; got != end {
+		t.Errorf("floors %v MHz after 50 s, want the %v it ends on: seven steps should not take over a minute", got, end)
+	}
+	if r.lateTick != 0 {
+		t.Errorf("%d late half-seconds on the way down", r.lateTick)
 	}
 }
