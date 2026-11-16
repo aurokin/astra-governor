@@ -678,3 +678,80 @@ func TestTargetCountedHighIsCorrectedNotHeldAtAmpleClocks(t *testing.T) {
 		t.Errorf("still at ample clocks: nothing was economised")
 	}
 }
+
+// uncapped is a stand-in for a game that draws as fast as the GPU lets it,
+// below the panel's rate: the rate wanders with the scene, and the GPU is full
+// at its top clock unless the CPU floor is under needMHz, when it waits for work.
+func (r *rig) uncapped(seconds, needMHz int) {
+	for i := 0; i < seconds*2; i++ {
+		r.now = r.now.Add(500 * time.Millisecond)
+		fps := 44 + 5*math.Sin(float64(i)/5) - 4*float64(r.rnd.Intn(5)/4)
+		busy := 0.99
+		if cpuTable[r.c.cpu] < needMHz {
+			fps, busy = fps*0.85, 0.84
+		}
+		r.hist = append(r.hist, fps)
+		if len(r.hist) > 12 {
+			r.hist = r.hist[1:]
+		}
+		sum := 0.0
+		for _, f := range r.hist {
+			sum += f
+		}
+		a := r.c.step(sample{now: r.now, flowing: true, fps: fps, fps6: sum / float64(len(r.hist)), fpsNow: fps, panelHz: panel,
+			hotBusy: 0.5, gpuBusy: busy, cpuNow: cpuTable[r.c.cpu], gpuNow: gpuTable[r.limits[1]], cpuLimit: r.limits[0], gpuLimit: r.limits[1]})
+		r.actions = append(r.actions, a)
+		if r.c.cpu == r.limits[0] && r.c.gpu == r.limits[1] {
+			r.ampleFor++
+		}
+	}
+}
+
+func TestGameTheGPULimitsDoesNotKeepTheCPUAtAmpleClocks(t *testing.T) {
+	r := newRig()
+	r.uncapped(60, 0)
+	r.ampleFor, r.actions = 0, nil
+	r.uncapped(300, 0)
+	if r.ampleFor != 0 {
+		t.Errorf("at ample clocks for %d of 600 half-seconds in a game the GPU limits", r.ampleFor)
+	}
+	if got := [2]int{cpuTable[r.c.cpu], gpuTable[r.c.gpu]}; got != [2]int{1363, 832} {
+		t.Errorf("floors %v MHz, want the resting CPU clock and the GPU's top floor", got)
+	}
+}
+
+func TestCPUFloorThatLeavesTheGPUShortOfWorkIsNotGoneBackTo(t *testing.T) {
+	r := newRig()
+	r.uncapped(120, 2227) // under 2227 MHz the CPU cannot keep the GPU fed
+	starved := 0
+	for i := 0; i < 600; i++ {
+		r.uncapped(1, 2227)
+		if cpuTable[r.c.cpu] < 2227 {
+			starved++
+		}
+	}
+	// Each look under the floor it needs costs a second short of work and some
+	// ten at ample clocks; they are spaced twice as far apart each time.
+	if starved > 5 {
+		t.Errorf("CPU floor under what the GPU needs for %d of 600 seconds", starved)
+	}
+	if r.ampleFor > 160 {
+		t.Errorf("at ample clocks for %d of 1440 half-seconds: the floor it can have is 2227 MHz", r.ampleFor)
+	}
+}
+
+func TestGameThatHoldsItsRateWithAFullGPUIsStillJudgedByItsFrames(t *testing.T) {
+	r := newRig()
+	for i := 0; i < 240; i++ { // 30 fps on time, the GPU full at its top clock
+		r.now = r.now.Add(500 * time.Millisecond)
+		a := r.c.step(sample{now: r.now, flowing: true, fps: 30, fps6: 30, fpsNow: 30, panelHz: panel,
+			hotBusy: 0.3, gpuBusy: 0.99, cpuNow: cpuTable[r.c.cpu], gpuNow: gpuTable[r.limits[1]], cpuLimit: r.limits[0], gpuLimit: r.limits[1]})
+		r.actions = append(r.actions, a)
+	}
+	if r.c.bound || r.count("bound") != 0 {
+		t.Errorf("a game on time at its own rate was called GPU-bound: %v", r.actions)
+	}
+	if r.c.target != 30 {
+		t.Errorf("target %.1f, want the 30 fps it holds", r.c.target)
+	}
+}

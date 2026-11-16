@@ -91,6 +91,14 @@ type controller struct {
 	topLate    []time.Time   // recent late ticks with both floors at their limits: lateness the clocks did not cause
 	adrift     bool          // called light on the strength of those, under the wider limit (driftShare)
 
+	// Content whose rate the GPU sets: see boundBusy.
+	bound          bool
+	boundRun       int           // consecutive ticks with the GPU saturated at its top clock
+	boundOff       int           // consecutive ticks, while bound, on which it had time to spare
+	boundStop      int           // the CPU floor is not lowered below this index ...
+	boundStopUntil time.Time     // ... until then: the GPU went short of work just under it
+	boundWait      time.Duration // how long that lasts; doubles each time it happens again
+
 	// Steps down are judged against the heaviest recent moment, not the current
 	// one, so a scene that is heavy now and then keeps the clocks it needs then.
 	recent []work
@@ -188,6 +196,24 @@ const (
 	driftShare = 0.30
 	driftLate  = 4                // late ticks at the limits ...
 	driftFor   = 30 * time.Second // ... within this long
+	// A GPU that is busy this share of the time at the top clock the vendor allows
+	// is what sets the frame rate, and no CPU clock adds a frame. A game drawing as
+	// fast as it can below the panel's rate is the case in point: SuperTuxKart
+	// with every effect on makes 90-105 fps of 166 as the scene changes, the law
+	// above read each dip as lateness and each rise as a new target, never left
+	// the top clocks, and drew 19.1 W against the vendor's 16.4 W for the same
+	// frames. Such content keeps the GPU's top floor, and the CPU floor comes down
+	// a step a second for as long as the GPU stays saturated: a CPU floor that
+	// starved it would show as GPU time to spare, whatever the frame rate does.
+	// It is only looked for in content already late again and again with both
+	// floors at their limits; a game that holds its rate with a full GPU is left
+	// to the law above, which watches its frames.
+	boundBusy      = 0.97
+	boundLeave     = 0.90 // GPU time to spare: a lighter scene, or a CPU floor that starves it
+	boundTicks     = 6    // three seconds saturated before the content is called GPU-bound
+	boundLate      = 3    // late ticks at the limits within driftFor
+	boundStepTicks = 2
+	boundHold      = time.Minute // how long the floor just under which the GPU went short is kept, at first
 	// Below this the stock CPU governor is slow to leave its low clocks for work
 	// that comes in a short burst per frame: outside games, played video lost a
 	// frame a second at 570 MHz and a fifth of that from 1152 MHz up.
@@ -232,7 +258,7 @@ func newController(cpuMHz, gpuMHz []int) *controller {
 
 func (c *controller) reset() {
 	*c = controller{cpuMHz: c.cpuMHz, gpuMHz: c.gpuMHz,
-		holdUntil: map[[2]int]time.Time{}, failed: map[[2]int][]time.Time{}, probeEvery: firstProbe, memory: firstMemory, turnsWait: turnsFor, spendWait: spendFor, lightWait: lightAgain}
+		holdUntil: map[[2]int]time.Time{}, failed: map[[2]int][]time.Time{}, probeEvery: firstProbe, memory: firstMemory, turnsWait: turnsFor, spendWait: spendFor, lightWait: lightAgain, boundWait: boundHold}
 }
 
 func (c *controller) enter(s state, now time.Time) {
@@ -356,6 +382,7 @@ func (c *controller) step(s sample) (action string) {
 		if c.idle++; c.idle >= idleTicks && c.state != idle {
 			c.cpu, c.gpu = 0, 0
 			c.light, c.lightRun, c.lightAfter, c.lightWait, c.topLate = false, 0, time.Time{}, lightAgain, nil
+			c.bound, c.boundRun, c.boundStopUntil, c.boundWait = false, 0, time.Time{}, boundHold
 			c.enter(idle, s.now)
 		}
 		return "idle"
@@ -393,6 +420,7 @@ func (c *controller) step(s sample) (action string) {
 	switch {
 	case c.lightRun >= lightTicks && (limit == driftShare || !s.now.Before(c.lightAfter)):
 		was := c.light
+		c.bound = false
 		if !was {
 			c.adrift = limit == driftShare
 			c.enter(track, s.now)
@@ -411,6 +439,46 @@ func (c *controller) step(s sample) (action string) {
 		c.cpu, c.gpu = s.cpuLimit, s.gpuLimit
 		c.enter(learn, s.now)
 		return "learn"
+	}
+
+	if saturated := s.gpuBusy >= boundBusy && s.gpuNow*10 >= c.gpuMHz[gpuAllowed]*9; saturated {
+		c.boundRun++
+	} else {
+		c.boundRun = 0
+	}
+	switch {
+	case c.bound && s.gpuBusy < boundLeave && c.boundOff >= 1:
+		// A second with GPU time to spare. If the scene got lighter, ample clocks
+		// will show what it wants now; if the CPU floor was starving the GPU, they
+		// will show it saturated again, and the floor then stops above this one.
+		c.boundStop, c.boundStopUntil = c.cpu+1, s.now.Add(c.boundWait)
+		c.boundWait = min(c.boundWait*2, maxMemory)
+		c.bound, c.boundRun, c.topLate = false, 0, nil
+		c.cpu, c.gpu = s.cpuLimit, gpuAllowed
+		c.enter(learn, s.now)
+		return "learn"
+	case c.bound:
+		c.boundOff = 0
+		if s.gpuBusy < boundLeave {
+			c.boundOff = 1
+		}
+		// The target is only what the status shows here: nothing is judged against it.
+		c.gpu, c.target = gpuAllowed, s.fps6
+		lowest := rest
+		if s.now.Before(c.boundStopUntil) {
+			lowest = max(lowest, c.boundStop)
+		}
+		if c.boundRun >= boundStepTicks && c.cpu > lowest {
+			c.cpu--
+			c.boundRun = 0
+			return fmt.Sprintf("bound-cpu%d", c.cpuMHz[c.cpu])
+		}
+		return ""
+	case c.boundRun >= boundTicks && len(c.topLate) >= boundLate && c.cpu >= s.cpuLimit && c.gpu >= gpuAllowed && s.fps < s.panelHz*nearPanel:
+		c.bound, c.boundRun, c.boundOff = true, 0, 0
+		c.enter(track, s.now)
+		c.target = s.fps6
+		return "bound"
 	}
 
 	switch c.state {
