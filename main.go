@@ -18,6 +18,11 @@
 // With -heat it also keeps the tablet under the vendor's thermal cut in Rise
 // (heat.go), by giving up GPU floor and then CPU ceiling a little at a time.
 //
+// With -base it also does one thing outside games, and nothing else there: it
+// holds the performance cores' minimum clock a little above the vendor's
+// while the screen is on (see governor.rest). No frames are watched and no
+// app is singled out; the control law stays behind the vendor's game scene.
+//
 // Everything it writes is runtime sysfs state that disappears on reboot.
 // The vendor's thermal limits are untouched: a floor never goes above the
 // vendor's cap, and a ceiling of ours can only be lower than theirs.
@@ -49,6 +54,7 @@ const (
 	ifasEnable = "/sys/kernel/ifas/ifas_enable"
 	kgsl       = "/sys/class/kgsl/kgsl-3d0/"
 	fanDir     = "/sys/kernel/fan/"
+	backlight  = "/sys/class/backlight/panel0-backlight/brightness"
 	cpufreq    = "/sys/devices/system/cpu/cpufreq/"
 	tick       = 500 * time.Millisecond
 )
@@ -376,6 +382,7 @@ type governor struct {
 	fanWas  int                // the fan level found before our first write in this game, 0 if we have not written
 	fanOurs int                // the level we last wrote
 	hold    []int              // for experiments: floors in MHz (prime cores, GPU, other cores) to hold in games instead of running the control law
+	base    int                // the performance cores' minimum outside games while the screen is on, kHz; 0 leaves it to the vendor
 }
 
 // gpuIndexToLevel maps the controller's ascending GPU table onto KGSL levels:
@@ -509,6 +516,35 @@ func (g *governor) leaveGame() {
 	}
 	g.c.reset()
 }
+
+// rest sets the performance cores' minimum for an app that is not a game: at
+// -base while the screen is on, back at the bottom of the table otherwise.
+//
+// Outside games the vendor lets these six cores idle at 384 MHz (it keeps the
+// two prime cores at 1018 MHz itself), and the stock governor is slow to leave
+// it for work that comes in short bursts once per frame. A 60 fps film then
+// loses a frame a second. Held at 1152 MHz, the clock the vendor itself falls
+// back to when a browser sits untouched, it loses a fifth of that for no power
+// that could be measured.
+//
+// It only ever raises a minimum that is below -base and only lowers one that
+// is exactly -base, so a minimum someone else holds higher (Diablo pins it to
+// the top) is never touched.
+func (g *governor) rest(on bool) {
+	if g.base == 0 {
+		return
+	}
+	path := cpufreq + policies[0] + "/scaling_min_freq"
+	switch cur := readInt(path); {
+	case on && cur < g.base:
+		write(path, strconv.Itoa(g.base))
+	case !on && cur == g.base:
+		write(path, strconv.Itoa(g.cpuFreqs[policies[0]][0]))
+	}
+}
+
+// screenOn reports whether the panel is lit.
+func screenOn() bool { return readInt(backlight) > 0 }
 
 // uncap puts our ceiling request on each cluster back at the top of its table,
 // where it limits nothing. The vendor's own limits are separate requests and
@@ -657,6 +693,7 @@ func (g *governor) step() {
 	}
 	if !g.game {
 		g.repin()
+		g.rest(g.enabled && screenOn())
 		g.st = st
 		return
 	}
@@ -857,6 +894,7 @@ func main() {
 	hold := flag.String("hold", "", "for experiments: hold these floors in games (\"cpuMHz,gpuMHz[,otherCoresMHz]\": the first is for the prime cores, and for the rest unless a third is given) instead of running the control law")
 	fanMin := flag.Int("fan", 0, "the slowest fan level to allow in games, 1-5 (the vendor runs 2 until the tablet is hot); 0 leaves the fan to the vendor")
 	heatC := flag.Float64("heat", 0, "in Rise, hold the board sensor (xo-therm) at or under this many C by giving up spare GPU floor and then CPU ceilings a step at a time; the vendor cuts the ceilings hard at 49. 0 leaves both alone")
+	base := flag.Int("base", 0, "outside games, hold the six performance cores' minimum at this many MHz while the screen is on (the vendor's is 384); 0 leaves it alone")
 	thrifty := flag.Bool("thrifty", false, "for experiments: give up spare GPU floor whatever the temperature, as -heat does near its target")
 	flag.Parse()
 	if *logPath != "" {
@@ -913,6 +951,9 @@ func main() {
 	for t, i := g.cpuFreqs["policy6"], len(g.cpuFreqs["policy6"])-1; i > 0 && t[i] > firstCut["policy6"]; i-- {
 		g.heat.max++
 	}
+	if *base != 0 {
+		g.base = g.cpuFloorKHz(policies[0], *base)
+	}
 	g.reclaim()
 
 	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
@@ -937,12 +978,13 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	busyTick := time.NewTicker(100 * time.Millisecond)
 	stepTick := time.NewTicker(tick)
-	log.Printf("astrad2 up: cpu floors %v MHz, gpu floors %v MHz, control=%v, fan=%d, heat=%v C in %d steps", cpuMHz, gpuMHz, g.enabled, g.fanMin, g.heatC, g.heat.max)
+	log.Printf("astrad2 up: cpu floors %v MHz, gpu floors %v MHz, control=%v, fan=%d, heat=%v C in %d steps, base=%d MHz", cpuMHz, gpuMHz, g.enabled, g.fanMin, g.heatC, g.heat.max, g.base/1000)
 	for {
 		select {
 		case <-sig:
 			g.mu.Lock()
 			g.leaveGame()
+			g.rest(false)
 			log.Print("restored and exiting")
 			os.Exit(0)
 		case <-busyTick.C:

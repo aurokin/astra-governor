@@ -7,6 +7,8 @@ sleep 15
 mkdir -p /data/adb/astra
 while [ ! -e "$MODDIR/disable" ] && [ ! -e "$MODDIR/remove" ]; do
   # -heat 48: in Rise, stay a degree under the board temperature at which the vendor cuts the CPU ceilings.
-  "$MODDIR/astrad2" -listen 127.0.0.1:7878 -log /data/adb/astra/astrad2.log -heat 48
+  # -base 1152: outside games, keep the six performance cores from idling below 1152 MHz while the
+  #   screen is on, which is what makes video miss frames. Nothing else is done outside games.
+  "$MODDIR/astrad2" -listen 127.0.0.1:7878 -log /data/adb/astra/astrad2.log -heat 48 -base 1152
   sleep 5
 done
