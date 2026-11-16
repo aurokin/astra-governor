@@ -401,6 +401,8 @@ type governor struct {
 	thrifty bool               // for experiments: give up spare GPU floor whatever the temperature
 	capKHz  map[string]int     // the ceiling we last asked for on each cluster, 0 if none
 	fanMin  int                // the slowest fan level to allow in games, 1-5; 0 leaves the fan to the vendor
+	fanHot  bool               // run the fan at its top level while the tablet is at or near a thermal cut
+	nearCut bool               // it is
 	fanWas  int                // the fan level found before our first write in this game, 0 if we have not written
 	fanOurs int                // the level we last wrote
 	hold    []int              // for experiments: floors in MHz (prime cores, GPU, other cores) to hold in games instead of running the control law
@@ -587,17 +589,7 @@ func (g *governor) uncap() {
 // cool sets the fan and the CPU ceilings for the board sensor's temperature and
 // the ceiling level it calls for.
 func (g *governor) cool(now time.Time, xoC float64, level int) {
-	if g.fanMin != 0 && read(fanDir+"fan_enable") == "1" { // off means the user switched the game fan off
-		// The vendor raises the level by itself when the tablet is hot; only a slower one is replaced.
-		if cur := readInt(fanDir + "fan_speed_level"); cur < g.fanMin {
-			if g.fanWas == 0 {
-				g.fanWas = cur
-			}
-			write(fanDir+"fan_speed_level", strconv.Itoa(g.fanMin))
-			log.Printf("fan level %d (was %d) at %.1f C", g.fanMin, cur, xoC)
-			g.fanOurs = g.fanMin
-		}
-	}
+	g.fan(xoC, level)
 	for _, p := range policies {
 		t, cut := g.cpuFreqs[p], firstCut[p]
 		// Each cluster gives up the same share of the way down to the vendor's first cut.
@@ -617,6 +609,67 @@ func (g *governor) cool(now time.Time, xoC float64, level int) {
 			log.Printf("%s ceiling %d MHz at %.1f C (heading for %.1f C)", p, khz/1000, xoC, g.heat.ahead(now))
 		}
 	}
+}
+
+// fanTop is the fan's fastest level: 20,000 rpm, where the vendor gives a game
+// level 2 (9,000 rpm) and goes to 4 once the tablet is hot.
+const fanTop = 5
+
+// fan runs the fan faster than the vendor does where that is asked for: never
+// slower than -fan, and with -fanhot at its top level while clocks are being
+// cut for heat or are about to be.
+//
+// "About to be" is within four degrees of the vendor's first cut on the board
+// sensor (49 C in Rise, 41 C in the other modes; given up again a degree
+// lower). "Being cut" is a ceiling of ours in place, or the vendor's thermal
+// cap on the GPU.
+//
+// The fan is the user's first: it is only ever made faster, only while it is
+// running (the vendor starts it for a game and stops it afterwards; a user who
+// switched it off has fan_enable at 0, and it stays off), and the level found
+// before our first write is put back when the reason has gone. In the vendor's
+// "Fast cooling" mode there is nothing left to raise.
+func (g *governor) fan(xoC float64, level int) {
+	cut := 49.0
+	if readInt(ifasParams+"gpu_max_pwrlevel_ceiling") != 0 { // 0 is Rise; Balance and Eco hold the GPU lower
+		cut = 41.0
+	}
+	g.nearCut = level > 0 || readInt(kgsl+"thermal_pwrlevel") > 0 || xoC >= cut-4 || (g.nearCut && xoC >= cut-5)
+	want := g.fanMin
+	if g.fanHot && g.nearCut {
+		want = fanTop
+	}
+	if read(fanDir+"fan_enable") != "1" {
+		return
+	}
+	cur := readInt(fanDir + "fan_speed_level")
+	set, ours, was := fanStep(cur, want, g.fanOurs, g.fanWas)
+	if set != cur {
+		write(fanDir+"fan_speed_level", strconv.Itoa(set))
+		log.Printf("fan level %d (was %d, the vendor's %d) at %.1f C", set, cur, was, xoC)
+	}
+	g.fanOurs, g.fanWas = ours, was
+}
+
+// fanStep decides the fan's level from the level it is at, the slowest we want
+// now (0 for no wish), the level we last wrote (0 if none stands) and the
+// vendor's level that write replaced. It never goes below the vendor's own
+// level, and takes a level that is neither ours nor slower than we want as the
+// vendor's new choice.
+func fanStep(cur, want, ours, was int) (set, newOurs, newWas int) {
+	if ours == 0 || cur != ours {
+		ours, was = 0, cur // nothing of ours stands: what is there is the vendor's
+	}
+	switch {
+	case want > cur:
+		return want, want, was
+	case ours != 0 && want < cur: // ours is faster than is still wanted
+		if back := max(want, was); back > was {
+			return back, back, was
+		}
+		return was, 0, was
+	}
+	return cur, ours, was
 }
 
 // firstCut is the ceiling the vendor's thermal cut puts on each cluster at 41 C, kHz.
@@ -922,13 +975,14 @@ func main() {
 	fanMin := flag.Int("fan", 0, "the slowest fan level to allow in games, 1-5 (the vendor runs 2 until the tablet is hot); 0 leaves the fan to the vendor")
 	heatC := flag.Float64("heat", 0, "in Rise, hold the board sensor (xo-therm) at or under this many C by giving up spare GPU floor and then CPU ceilings a step at a time; the vendor cuts the ceilings hard at 49. 0 leaves both alone")
 	base := flag.Int("base", 0, "outside games, hold the six performance cores' minimum at this many MHz while the screen is on (the vendor's is 384); 0 leaves it alone")
+	fanHot := flag.Bool("fanhot", false, "run the fan at its top level while clocks are being cut for heat, or the board is within four degrees of the vendor's first cut; only ever faster than the vendor has it, and never when it is switched off")
 	thrifty := flag.Bool("thrifty", false, "for experiments: give up spare GPU floor whatever the temperature, as -heat does near its target")
 	flag.Parse()
 	if *logPath != "" {
 		log.SetOutput(&logFile{path: *logPath})
 	}
 
-	g := &governor{enabled: !*monitor, stock: map[string]string{}, cpuFreqs: map[string][]int{}, fanMin: *fanMin, thrifty: *thrifty}
+	g := &governor{enabled: !*monitor, stock: map[string]string{}, cpuFreqs: map[string][]int{}, fanMin: *fanMin, fanHot: *fanHot, thrifty: *thrifty}
 	g.heatC = *heatC
 	if *hold != "" {
 		g.hold = []int{0, 0, 0}

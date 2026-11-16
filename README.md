@@ -32,7 +32,7 @@ The vendor's stack, top to bottom:
 | How low the clocks may go | decided here: `scaling_min_freq` per cluster, `kgsl-3d0/min_pwrlevel` |
 | Stock CPU and GPU governors | nothing; they choose the clock above the minimum |
 | Thermal limits | nothing; a minimum never exceeds a vendor cap, a maximum of ours is only ever lower |
-| Fan | nothing unless `-fan` is given |
+| Fan | nothing unless `-fan` or `-fanhot` is given; then only ever faster than the vendor has it, and never when it is switched off |
 
 Everything it writes is runtime sysfs state that a reboot clears. It hands
 all of it back when the game leaves the screen, when Diablo is switched on,
@@ -77,8 +77,17 @@ cores' minimum is held at 1152 MHz instead of the vendor's 384. Nothing else.
 (`module/service.sh`).
 
 Flags: `-heat C`, `-base MHz`, `-fan LEVEL` (slowest fan level to allow in
-games; unused), `-monitor` (observe only), and for experiments `-hold` and
-`-thrifty`.
+games), `-fanhot` (top fan level while clocks are being cut for heat or the
+board is within four degrees of the vendor's first cut), `-monitor` (observe
+only), and for experiments `-hold` and `-thrifty`. Neither fan flag is in the
+module's command line yet.
+
+The vendor's fan settings, for reference: `system fan_state_of_mode` is 1 or
+absent for "Balanced heat dissipation" (its own choice of speed) and 0 for
+"Fast cooling"; `system fan_state_of_manual` is 100 / -100 when the system
+switched the fan on / off for a game and 1 / 0 when the user did by hand;
+`/sys/kernel/fan/fan_enable`, `fan_speed_level` (1-5) and `fan_speed_count`
+(rpm) are what it is doing.
 
 ## Measurements
 
