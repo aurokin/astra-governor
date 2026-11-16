@@ -69,6 +69,12 @@ var ratchet = map[string]string{
 	"scaling_a":               "5",
 	"rescue_freq_level_up":    "15",
 	"cpu_loading_enable":      "0",
+	// IFAS has a GPU policy of its own that would move the GPU's ceiling as it
+	// moves the CPU's. The vendor ships it switched off (in 515 recorded runs the
+	// ceiling never left the mode's own: 1100 MHz in Rise, 832 in Balance, 342 in
+	// Eco), and our GPU floor is built on that. This keeps it off in games should
+	// an update switch it on.
+	"enable_gpu_policy": "0",
 }
 
 func read(path string) string {
@@ -962,7 +968,7 @@ func main() {
 			g.stock[k] = cur
 		}
 	}
-	for k, v := range map[string]string{"normal_frame_keep_count": "8", "scaling_a": "310", "rescue_freq_level_up": "0", "cpu_loading_enable": "1"} {
+	for k, v := range map[string]string{"normal_frame_keep_count": "8", "scaling_a": "310", "rescue_freq_level_up": "0", "cpu_loading_enable": "1", "enable_gpu_policy": "0"} {
 		if _, ok := g.stock[k]; !ok {
 			g.stock[k] = v
 		}
