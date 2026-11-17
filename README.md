@@ -73,13 +73,14 @@ cores' minimum is held at 1152 MHz instead of the vendor's 384. Nothing else.
     adb shell su -c 'curl -s 127.0.0.1:7878/status'
 
 `SERIAL=...` selects the device. The module starts the daemon with
-`-listen 127.0.0.1:7878 -log /data/adb/astra/astrad2.log -heat 48 -base 1152`
+`-listen 127.0.0.1:7878 -log /data/adb/astra/astrad2.log -heat 48 -base 1152 -thrifty`
 (`module/service.sh`).
 
 Flags: `-heat C`, `-base MHz`, `-fan LEVEL` (slowest fan level to allow in
 games), `-fanhot` (top fan level while clocks are being cut for heat or the
 board is within four degrees of the vendor's first cut), `-monitor` (observe
-only), and for experiments `-hold` and `-thrifty`. Neither fan flag is in the
+only), `-thrifty` (give back GPU minimum the GPU is not using at any
+temperature, not only near `-heat`'s target), and for experiments `-hold`. Neither fan flag is in the
 module's command line yet.
 
 The vendor's fan settings, for reference: `system fan_state_of_mode` is 1 or

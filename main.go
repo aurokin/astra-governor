@@ -398,7 +398,7 @@ type governor struct {
 	side    []float64          // recent ratios of the other cluster's heaviest game thread to the busiest one, as work
 	heat    heat               // CPU ceilings against the vendor's thermal cut
 	heatC   float64            // the temperature to hold in Rise, 0 for none
-	thrifty bool               // for experiments: give up spare GPU floor whatever the temperature
+	thrifty bool               // give up spare GPU floor whatever the temperature
 	capKHz  map[string]int     // the ceiling we last asked for on each cluster, 0 if none
 	fanMin  int                // the slowest fan level to allow in games, 1-5; 0 leaves the fan to the vendor
 	fanHot  bool               // run the fan at its top level while the tablet is at or near a thermal cut
@@ -976,7 +976,7 @@ func main() {
 	heatC := flag.Float64("heat", 0, "in Rise, hold the board sensor (xo-therm) at or under this many C by giving up spare GPU floor and then CPU ceilings a step at a time; the vendor cuts the ceilings hard at 49. 0 leaves both alone")
 	base := flag.Int("base", 0, "outside games, hold the six performance cores' minimum at this many MHz while the screen is on (the vendor's is 384); 0 leaves it alone")
 	fanHot := flag.Bool("fanhot", false, "run the fan at its top level while clocks are being cut for heat, or the board is within four degrees of the vendor's first cut; only ever faster than the vendor has it, and never when it is switched off")
-	thrifty := flag.Bool("thrifty", false, "for experiments: give up spare GPU floor whatever the temperature, as -heat does near its target")
+	thrifty := flag.Bool("thrifty", false, "give up GPU floor the GPU's busy share does not call for at any temperature, not only near -heat's target (content at the panel's rate whose CPU floor stays at its limit; see sample.thrifty)")
 	flag.Parse()
 	if *logPath != "" {
 		log.SetOutput(&logFile{path: *logPath})
