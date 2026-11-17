@@ -5,7 +5,7 @@ are for understanding it and changing it, roughly in the order to read them.
 
 | Read | When you want to know |
 | --- | --- |
-| [How it works](how-it-works.md) | what it does, where it sits among the vendor's software, what it writes and how it hands everything back; the code map |
+| [How it works](how-it-works.md) | **start here**: the vendor's system and where astra-governor fits, in a minute and then in detail; what it does, where it sits among the vendor's software, what it writes and how it hands everything back; the code map |
 | [The vendor's system](vendor-system.md) | how RedMagicOS decides clocks: Game Space modes, the vendor's frame governor (IFAS), the heat ladder, the fan, refresh-rate settings, and quirks that affect measurements |
 | [The control law](control-law.md) | every rule in `control.go` and `heat.go`, the measurement that motivated it, the tuning constants, known limits |
 | [The display](display.md) | the panel's real refresh rates, what they mean for games, video and streams, and what was tried to change them |

@@ -9,7 +9,6 @@ T=${0%/*}
 # The supervisor goes first so it does not restart the daemon under us. The
 # daemon restores every setting it holds when it gets the signal.
 for p in $(ps -A -o PID,ARGS | grep "$M/service.sh" | grep -v grep | awk '{print $1}'); do kill $p; done
-pkill -TERM -x astrad || true
 pkill -TERM -x astrad2 || true
 sleep 2
 for f in astrad2 service.sh module.prop; do [ -f $T/$f ] && cp $T/$f $M/$f; done

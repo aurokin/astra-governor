@@ -1,27 +1,64 @@
 # How it works
 
-The overview a developer needs before reading the code. It assumes
-[the vendor's system](vendor-system.md) in outline: Game Space modes, the
-vendor's frame governor (IFAS), the stock CPU and GPU governors, and the
-thermal engine.
+The vendor's system, where astra-governor fits in it, and how it works, in
+three depths: the first section in a minute, this page in ten, and
+[the vendor's system](vendor-system.md) and [the control law](control-law.md)
+for everything measured about each.
 
-## The problem it solves
+## In one minute
 
-The vendor's frame governor saves power by lowering a CPU clock cap until a
-game is just short of its deadline, and the stock governors raise clocks on
-load, not on lateness. In an emulator the busiest thread and the GPU take
-turns within each frame, so neither looks busy while the frame is late. The
-result is a game held on the edge: Super Mario Galaxy's heavy scene at 71% of
-its speed in Balance, with the GPU at its lowest clock. Diablo fixes it by
-pinning every clock at the top, at twice the power or more.
+- **The vendor's system.** A game's mode in Game Space (Eco, Balance, Rise,
+  Diablo) sets the highest clocks the CPU and GPU may run at. Under those,
+  the vendor's frame governor, IFAS, lowers a CPU cap for as long as frames
+  are on time, and the stock governors pick the actual clock from how busy
+  the CPU and GPU are. The thermal engine cuts the maximums as the board
+  heats up.
+- **The trouble.** IFAS raises its cap only once frames are already late, and
+  busy-based governors misjudge emulators, whose busiest thread and GPU take
+  turns within each frame, so neither looks busy while the frame is late.
+  Games end up on the edge of their deadline: Super Mario Galaxy's heavy scene
+  at 71% of its speed in Balance, the GPU at its lowest clock. Diablo fixes it
+  by pinning every clock at the top, at twice the power or more.
+- **What astra-governor does.** It takes over one decision: how *low* the
+  clocks may go during a game. It watches every frame the game shows, starts
+  with ample minimums and lowers them a step at a time while the game stays on
+  time; a late frame sends them back up. During games it holds IFAS's cap at
+  the mode's ceiling. It leaves the mode's maximums and the vendor's heat limits
+  alone, and hands everything back when the game ends.
 
-astra-governor watches every frame the game presents and sets the lowest
-**minimum** clocks that keep the game on time.
+## The stack, with astra-governor in it
 
-## Where it sits
+```
+Game Space mode           sets the maximums per game ............ untouched
+  |
+IFAS (kernel module)      lowers a CPU cap while frames are ..... during games: four
+  |                       on time                                 parameters rewritten,
+  |                                                               cap stays at the ceiling
+  |
+walt (CPU),               pick the clock between the minimum .... astra-governor sets
+KGSL devfreq (GPU)        and the maximum they are given          the minimums
+  |
+thermal-engine            cuts the maximums on board heat ....... untouched; in Rise the
+                                                                  heat control stays
+                                                                  under its first cut
+```
 
-It adds a layer beside the vendor's and takes over one decision: how low the
-clocks may go during a game.
+On the CPU every limit is a separate request on the same cpufreq policy: the
+lowest maximum wins, and the highest minimum up to it. astra-governor adds
+requests of its own and cannot remove the vendor's; a minimum it sets is never
+above the vendor's current maximum.
+
+## In each situation
+
+| Situation | What it does |
+| --- | --- |
+| A Game Space game in front, Eco, Balance or Rise | the control law runs: frames read twice a second, minimums set |
+| Rise, board heading for the vendor's cut | the heat control lowers CPU maximums a step at a time, no further than the vendor's own first cut |
+| Diablo | stands down; the vendor pins every clock |
+| Anything else, screen on | holds the six performance cores' minimum at 1152 MHz (the vendor's is 384); watches no frames |
+| Screen off | nothing |
+
+## Each vendor part, and what astra-governor does with it
 
 | Vendor part | What astra-governor does |
 | --- | --- |
@@ -51,16 +88,6 @@ The IFAS parameters rewritten during games, and what each is set to:
 
 The combined effect (the cap rises to the mode's ceiling and stays) is
 measured; the meaning of each parameter on its own is read from its name.
-
-## In each situation
-
-| Situation | What it does |
-| --- | --- |
-| A Game Space game in front, Eco, Balance or Rise | the control law runs: frames read twice a second, minimums set |
-| Rise, board heading for the vendor's cut | the heat control lowers CPU maximums a step at a time, no further than the vendor's own first cut |
-| Diablo | stands down; the vendor pins every clock |
-| Anything else, screen on | holds the six performance cores' minimum at 1152 MHz (the vendor's is 384); watches no frames |
-| Screen off | nothing |
 
 ## The control loop, in brief
 

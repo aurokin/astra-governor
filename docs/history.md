@@ -90,5 +90,10 @@ Other changes in the same rewrite:
   ~90 fps; not built.
 - **The system refresh setting** switching itself to 60 Hz, twice; cause
   unknown.
+- **Something raises the GPU floor early in boot**: twice, the daemon found
+  `min_pwrlevel` above the base level when it started 15 s after boot and put
+  it back (its start-up check assumes only a killed instance of its own leaves
+  it raised). What raised it, and for how long it would have stayed, was not
+  looked into; a guess is a vendor boot boost.
 - **Unexplained cooling spells**: board, skin and battery falling 2-5 C at an
   unchanged load.

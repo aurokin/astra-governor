@@ -20,7 +20,6 @@ checked by breaking the rule they cover and seeing them fail.
 
 ```sh
 sh module/install.sh            # build, copy into the installed module, restart; no reboot
-sh module/install.sh --first    # back to the first governor (its files are outside this repository)
 sh module/build-zip.sh          # build/astra-governor-<version>.zip, for a fresh install from the Magisk app
 SERIAL=... sh module/install.sh # another device
 ```

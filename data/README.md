@@ -1,7 +1,7 @@
 # Measured runs
 
 `campaigns/<name>.jsonl` holds one line per recording: the summary the test
-bench wrote after each run (690 runs, 2026-11-13 to 11-17). The raw
+bench wrote after each run (760 runs, 2026-11-13 to 11-17). The raw
 recordings (every frame's present time, clocks ten times a second) are about
 670 MB and stay with the test bench in `~/workspace/astra-root/lab/runs/`.
 
@@ -61,4 +61,5 @@ python3 tools/results.py runs native3
 | `fan0`-`fan2` | the fan switched in blocks; matched-start fan pairs |
 | `turns1` | the alternating-descent build against the installed one |
 | `thrifty1`-`thrifty3` | the thrifty GPU rule from the start; Soulcalibur against the vendor |
+| `release1` | the 0.3 release zip installed fresh through Magisk, after a reboot: Super Mario Galaxy against stock |
 | `_loadgen_csv` | per-frame logs written by the synthetic load app itself |
