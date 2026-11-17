@@ -5,7 +5,7 @@
 set -e
 M=/data/adb/modules/astra
 T=${0%/*}
-[ -x $M/astrad ] || { echo "the astra module is not installed"; exit 1; }
+[ -f $M/module.prop ] || { echo "the astra module is not installed: install the zip from the Magisk app first (module/build-zip.sh)"; exit 1; }
 # The supervisor goes first so it does not restart the daemon under us. The
 # daemon restores every setting it holds when it gets the signal.
 for p in $(ps -A -o PID,ARGS | grep "$M/service.sh" | grep -v grep | awk '{print $1}'); do kill $p; done

@@ -1,99 +1,104 @@
-# astra-governor
+# Astra governor
 
-A frame-rate governor for the RedMagic Astra tablet (NP05J, RedMagicOS 11,
-Snapdragon 8 Elite). The daemon, `astrad2`, watches every frame a game presents
-and sets minimum CPU and GPU clocks so that the game is not starved, with as
-little clock as that takes. It runs as root from a Magisk module.
+Smooth frame rates on the RedMagic Astra without Diablo mode.
 
-It only supports this tablet's vendor kernel: it refuses to start without the
-vendor's frame governor (IFAS), KGSL and cpufreq sysfs.
+The Astra's own frame governor saves power by letting games run right on the
+edge of their deadline, so emulators in Balance or Rise stutter and drop
+frames, and Diablo fixes it only by pinning every clock at the top. This
+Magisk module watches every frame a game shows and gives it the lowest CPU and
+GPU clocks that keep it on time: Diablo's smoothness at a fraction of its
+power and heat.
 
-## Where it sits
+| Super Mario Galaxy, heaviest scene | Smooth seconds | Speed | Power |
+| --- | --- | --- | --- |
+| Balance, stock | 0% | 71% | 3.7 W |
+| Diablo | 100% | 100% | 7.5 W |
+| Balance, with Astra governor | 100% | 100% | 4.5 W |
 
-The vendor's stack, top to bottom:
+## Is it for you?
 
-1. **Game Space mode** (Eco, Balance, Rise, Diablo) sets a game's clock
-   ceilings and where the thermal ladder starts. GPU ceilings: 1100 MHz in
-   Rise, 832 in Balance, 342 in Eco.
-2. **IFAS**, the vendor's frame governor, runs while a Game Space game is in
-   front outside Diablo. It lowers a CPU clock cap after every 8 on-time
-   frames and raises it only once frames are clearly late.
-3. **The stock CPU (WALT) and GPU (KGSL) governors** pick the clock between
-   the minimum and maximum they are given.
-4. **The thermal engine** cuts the maximums on the board sensor `xo-therm`.
+You need:
 
-`astrad2` adds a layer and replaces one decision:
+- a **RedMagic Astra (NP05J)** on **RedMagicOS 11.0.7** (global build); it was
+  built and measured on one tablet with that firmware;
+- an **unlocked bootloader and root with Magisk** (20.4 or later).
 
-| Vendor part | What astrad2 does |
-| --- | --- |
-| Modes and their ceilings | nothing; it works beneath them |
-| Whether a game scene is active | reads `ifas_enable`, never writes it |
-| IFAS lowering the CPU cap | switched off in games: `normal_frame_keep_count`, `scaling_a`, `rescue_freq_level_up`, `cpu_loading_enable` are rewritten so the cap goes to the mode's ceiling and stays (`enable_gpu_policy` is held at the 0 the vendor ships) |
-| How low the clocks may go | decided here: `scaling_min_freq` per cluster, `kgsl-3d0/min_pwrlevel` |
-| Stock CPU and GPU governors | nothing; they choose the clock above the minimum |
-| Thermal limits | nothing; a minimum never exceeds a vendor cap, a maximum of ours is only ever lower |
-| Fan | nothing unless `-fan` or `-fanhot` is given; then only ever faster than the vendor has it, and never when it is switched off |
+It does nothing on any other device: the daemon checks for the Astra's
+kernel interfaces and refuses to start without them.
 
-Everything it writes is runtime sysfs state that a reboot clears. It hands
-all of it back when the game leaves the screen, when Diablo is switched on,
-and when it exits; a new instance undoes what a killed one left behind.
+## Install
 
-## What it does
+1. Get `astra-governor-<version>.zip` (build it with `sh module/build-zip.sh`;
+   no releases are published yet).
+2. In the Magisk app: **Modules → Install from storage**, pick the zip.
+3. Reboot. The governor starts about 15 seconds after the tablet has booted.
 
-**In a game** (twice a second, `control.go`):
+To update, install the new zip the same way. To remove it, remove **Astra
+governor** in Magisk's Modules list and reboot; to pause it, switch the
+module off there.
 
-- reads the game's presented frame times from SurfaceFlinger, the GPU's busy
-  share, and the busy share and clock of the game's busiest thread;
-- on a new scene asks for ample clocks for two seconds and takes the rate the
-  game reaches as what the content wants;
-- lowers the CPU and GPU minimums a step at a time while that rate holds,
-  judging each step against the heaviest recent moment;
-- on a late frame it cannot explain, goes back to ample clocks at once and
-  leaves the setting that failed alone for a while;
-- content with next to no work of its own (a stream, a menu) rests at low
-  clocks; a game the GPU limits keeps the GPU's top clock while the CPU comes
-  down.
+## Using it
 
-**Heat** (`heat.go`, `-heat 48`, Rise only): from 45 C on the board sensor it
-gives up GPU minimum the GPU's busy share does not call for; when the sensor
-is heading past 48 C it lowers the CPU maximums a table entry at a time, no
-further than the vendor's own first cut at 49 C.
+- **Games must be in Game Space.** The governor only takes over in apps that
+  Game Space treats as games, outside Diablo. Add an emulator or game to Game
+  Space if it isn't there.
+- **Pick Balance or Rise per game, not Diablo.** Balance is enough for most
+  emulators, streaming and lighter games. Use Rise for the heaviest games (PS2,
+  demanding GameCube and Wii scenes): it keeps more headroom and the vendor's
+  heat limits start later. In Diablo the governor stands aside.
+- **Refresh rate per game.** Game Space starts each game at 60 Hz unless you
+  change it with the refresh button in the in-game overlay. The governor holds
+  120, 144 and 165 Hz games at full rate too.
+- **Streaming** (Moonlight, Artemis): add the app to Game Space and use
+  Balance. The governor recognises a stream and keeps the clocks low.
+- **Outside games** it only keeps the performance cores from idling so low
+  that video drops frames. No setup needed.
 
-**Outside games** (`-base 1152`): while the screen is on, the six performance
-cores' minimum is held at 1152 MHz instead of the vendor's 384. Nothing else.
+## What to expect
 
-**In Diablo** it stands down.
+Measured on the tablet against the stock behaviour in the same mode
+(details in [docs/results.md](docs/results.md)):
 
-## Build, install, undo
+| | Stock | Astra governor |
+| --- | --- | --- |
+| Emulator scenes at 60 Hz, Balance | 7 of 16 scenes below 90% smooth seconds | 15 of 16 at 88% or better |
+| SuperTuxKart at 165 Hz, 30 minutes | 1.35 late frames a second | 99.9% smooth seconds |
+| Games at 120 and 144 Hz | occasional late frames | every second smooth |
+| Game streaming | the same frames | the same frames, decoded up to 1.6 ms faster, same power |
+| 60 fps video outside games | 58.8 fps | 59.8 fps, no measurable power cost |
 
-    go test ./...
-    sh module/install.sh            # builds for the tablet, copies into the Magisk module, restarts; no reboot
-    sh module/install.sh --first    # back to the first governor
-    adb shell su -c 'curl -s 127.0.0.1:7878/disable'   # off until /enable or a restart
-    adb shell su -c 'curl -s 127.0.0.1:7878/status'
+Against Diablo, the same smoothness in nearly every game at half to two thirds
+of the power.
 
-`SERIAL=...` selects the device. The module starts the daemon with
-`-listen 127.0.0.1:7878 -log /data/adb/astra/astrad2.log -heat 48 -base 1152 -thrifty`
-(`module/service.sh`).
+## Good to know
 
-Flags: `-heat C`, `-base MHz`, `-fan LEVEL` (slowest fan level to allow in
-games), `-fanhot` (top fan level while clocks are being cut for heat or the
-board is within four degrees of the vendor's first cut), `-monitor` (observe
-only), `-thrifty` (give back GPU minimum the GPU is not using at any
-temperature, not only near `-heat`'s target), and for experiments `-hold`. Neither fan flag is in the
-module's command line yet.
+- **The first two or three minutes after starting a game** use 1.5-2 W more
+  than later, while the governor works down from ample clocks.
+- **In Rise it stays under the vendor's heat cut** where it can: God of War II
+  ran 28 minutes without the cut, three times out of three, at 1.4 W less than
+  without this heat control (which reached the cut after 18-26 minutes).
+- **A game too heavy for the GPU at your refresh rate** (an Android game at
+  maximum settings at 165 Hz) still hits the tablet's heat limit; the governor
+  cannot make the tablet cooler. Cap the game's frame rate or lower its
+  settings.
+- **The screen's refresh rates are slightly fast**: 60.27 Hz instead of 60,
+  166.06 instead of 165. A 59.94 fps emulator therefore repeats one frame about
+  every three seconds in any mode. That is the panel, not the governor; see
+  [docs/display.md](docs/display.md).
+- **Faster fan speeds don't help**: running the fan at full speed changed no
+  temperature in three tests, so the governor leaves the fan to the system.
 
-The vendor's fan settings, for reference: `system fan_state_of_mode` is 1 or
-absent for "Balanced heat dissipation" (its own choice of speed) and 0 for
-"Fast cooling"; `system fan_state_of_manual` is 100 / -100 when the system
-switched the fan on / off for a game and 1 / 0 when the user did by hand;
-`/sys/kernel/fan/fan_enable`, `fan_speed_level` (1-5) and `fan_speed_count`
-(rpm) are what it is doing.
+## Safety
 
-## Measurements
+The governor only sets clock limits that the kernel already exposes, and only
+at runtime: a reboot clears every value. It never raises a clock above the
+vendor's own limits, never touches thermal protection, the bootloader, the
+firmware or the display, and hands every setting back when a game ends, when
+you switch to Diablo, or if it stops. Removing the module returns the tablet
+to stock behaviour after a reboot.
 
-The test bench (frame recorder, scripted game scenes, sweeps, every recorded
-run and the notes on them) is not in this repository. It lives in
-`~/workspace/astra-root/lab`; its `README.md` has the results, and
-`recorder/handover.py` there is the on-device check to run after changing the
-daemon. It finds this repository at `~/code/astra-governor` or `$ASTRA_GOVERNOR`.
+## More
+
+[docs/](docs/README.md) explains how it works, how the RedMagic system decides
+clocks and heat limits, the display, every measurement, and how to develop
+and test changes.

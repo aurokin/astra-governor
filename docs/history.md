@@ -1,0 +1,94 @@
+# History and decisions
+
+How the design got here, what was tried and dropped, and what is still open.
+Dates are 2026.
+
+## Timeline
+
+| Date | What happened |
+| --- | --- |
+| 11-08 | Tablet unlocked and rooted with Magisk 31.1 on stock firmware; a full partition backup kept |
+| 11-09 to 11-10 | **First governor** (`astrad`): bottom-up control of the GPU minimum and the CPU governor's boost, from a once-a-second frame histogram. Super Mario Galaxy's heavy scene from 71% speed to 100% in Balance. The panel's real rates measured |
+| 11-10 to 11-12 | Display timing investigated at length; no safe correction ([display.md](display.md)) |
+| 11-13 | Test bench, synthetic load app and 22 staged scenes. The first governor found to settle starved games on a clean half rate. **astra-governor** (`astrad2`) written: top-down, every frame, CPU and GPU minimums |
+| 11-14 | First full comparison (`real2`); astra-governor installed as the tablet's governor; hand-over checks |
+| 11-15 | Heat control (`-heat 48`); the thrifty GPU rule near the heat target; non-game floor (`-base 1152`); streams rested on low clocks; three faults fixed |
+| 11-16 | Panel rates above 60 Hz; native games; Chrome; GPU-bound rule; long runs at 165 Hz; fan tests; the repository split out of the test bench |
+| 11-17 | The thrifty GPU rule from the start (`-thrifty`); IFAS's GPU policy held off |
+
+## Why the first governor was replaced
+
+The first governor started from the vendor's low clocks and raised them when
+frames were late. On the synthetic loads of 11-13 (`sweep1`, `sweep2`) it held
+a GPU-heavy load at exactly half its rate (50.3% speed, 0% clean) and a 30 fps
+load with a share of every second late. A starved game that settles on a clean
+fraction of the panel's rate looks like a healthy game at that rate, and
+nothing raises the clocks. astra-governor learns the target at ample clocks
+first and works down; on the same loads (`sweep2`, `sweep3`) it held 100% with
+97-100% of seconds clean.
+
+Other changes in the same rewrite:
+
+- **Every frame, not a histogram**: SurfaceFlinger's per-layer present times
+  twice a second, so one late frame is one event.
+- **Minimums for both CPU and GPU** instead of the CPU governor's boost, so a
+  step down can be predicted for either.
+- **The other cluster** gets only what its own busiest game thread needs, so
+  six idle cores are not held at a high clock because two busy ones need it.
+
+## Faults found and fixed
+
+| Date | Fault | Fix |
+| --- | --- | --- |
+| 11-14 | a game's own late frames held against the floors, blocking every setting | a late frame at the top is held against nothing (`uneven`) |
+| 11-14 | bursts the busy share does not show (God of War II) | follow how high the stock CPU governor reaches (`demand`) |
+| 11-15 | a target counted 1-2.5% high was never corrected; the floors stayed at the top | replace it after eight seconds at the top (`roughFor`) |
+| 11-15 | streams held at the top clocks for a watt and no frame | the light rule |
+| 11-15 | the governor followed a streaming app's once-a-second overlay instead of its video | follow the layer with the most frames |
+| 11-15 | the non-game floor took back a minimum it had not set | only take back its own |
+| 11-16 | a game the GPU limits kept the CPU at the top (19.1 W against 16.4) | the GPU-bound rule |
+| 11-16 | GPU clock held on suspicion in games that drop frames by themselves (Soulcalibur at 1060 MHz, 4% busy) | the thrifty rule from the start |
+
+## Tried and not adopted
+
+- **Faster descent after a launch or rescue**, three ways (11-16). Going to the
+  predicted end in one move, and a step every five seconds while nothing is
+  late, each failed the control law's own tests: the CPU minimum went under a
+  game's bursts before the stock governor had shown them, and the GPU minimum
+  stepped on a busy share that had not caught up. CPU and GPU steps
+  alternating five seconds apart passed the tests and ran on 14 scenes
+  (`turns1`, branch `descent-in-turns`): no change beyond the run-to-run
+  spread, because a launch's loading nearly always produces the late frame that
+  ends the faster pace.
+- **The fan faster than the vendor runs it** (`-fan`, `-fanhot`). No effect on
+  any sensor, power or frame rate in three tests; built, not used.
+- **Holding the vendor's own knobs fixed** (the `staticN` arms, 11-13: the
+  CPU-cap ratchet plus the GPU governor's load gain). Fixed a CPU-heavy load,
+  took a GPU-heavy one from 45% to 70% of its rate, and left the balanced,
+  stepped and 30 fps loads as starved as the vendor alone (`sweep1`).
+- **Pinning the GPU in Rise**, or lifting Balance's GPU ceiling to 1100 MHz
+  (discussed 11-16). Governed Rise games ran with the GPU at a median of
+  512 MHz, and in 171 Balance runs the 832 MHz ceiling never held a governed
+  game back: no frames to gain, only heat.
+- **Rejected without a trial**: writing the panel controller's flash, and any
+  further panel register traffic.
+
+## Open problems
+
+- **Content late at ample clocks with modest work** (Soulcalibur's attract
+  loop in some launches): the minimums stay at the top for 1.5-3.6 W more than
+  the vendor, though far more frames are on time. A mode of its own is
+  sketched: content late at the top again and again, whose busy shares at the
+  resting clock fall between the light rule's limits and a real game's, would
+  step down regardless and take a timed look at ample clocks to confirm they
+  still give no more frames. The light rule's wider limit is not it:
+  Soulcalibur's busiest thread is 31-43% busy at the resting clock, and its
+  bursts would take it in and out every few seconds.
+- **The launch cost**: 1.5-2 W for two or three minutes after each launch.
+- **A GPU ceiling of our own** just under the vendor's heat cap (967 or
+  900 MHz) would turn the heavy game's 77-105 fps swing into a steadier
+  ~90 fps; not built.
+- **The system refresh setting** switching itself to 60 Hz, twice; cause
+  unknown.
+- **Unexplained cooling spells**: board, skin and battery falling 2-5 C at an
+  unchanged load.
