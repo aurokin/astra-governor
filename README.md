@@ -28,8 +28,9 @@ kernel interfaces and refuses to start without them.
 
 ## Install
 
-1. Get `astra-governor-<version>.zip` (build it with `sh module/build-zip.sh`;
-   no releases are published yet).
+1. Download `astra-governor-<version>.zip` from the repository's
+   [Releases](https://github.com/aurokin/astra-governor/releases) page (or build
+   it with `sh module/build-zip.sh`).
 2. In the Magisk app: **Modules → Install from storage**, pick the zip.
 3. Reboot. The governor starts about 15 seconds after the tablet has booted.
 

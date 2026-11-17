@@ -15,7 +15,7 @@ if [ "$1" = --first ]; then
   [ -f "$FIRST/service.sh" ] || { echo "first governor not found at $FIRST (set ASTRA_FIRST_GOVERNOR)"; exit 1; }
   adb -s $S push "$FIRST/service.sh" "$FIRST/module.prop" "$HERE/switch.sh" $T/ >/dev/null
 else
-  (cd "$HERE/.." && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o build/astrad2 .)
+  (cd "$HERE/.." && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o build/astrad2 .)  # built as build-zip.sh builds it, so a release's binary and an installed one match
   adb -s $S push "$HERE/../build/astrad2" "$HERE/service.sh" "$HERE/module.prop" "$HERE/switch.sh" $T/ >/dev/null
 fi
 adb -s $S shell su -c "'sh $T/switch.sh; rm -rf $T'"

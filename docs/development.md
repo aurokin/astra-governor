@@ -128,7 +128,12 @@ is not charging.
 2. `recorder/handover.py` on the tablet.
 3. A `builds.sh` comparison against the installed build on the scenes the
    change could affect, and on the default set if it touches the control law.
-4. Bump `version` and `versionCode` in `module/module.prop`, then
-   `sh module/install.sh`, or `sh module/build-zip.sh` for a zip.
+4. Bump `version` and `versionCode` in `module/module.prop`, commit, then
+   `sh module/install.sh`.
 5. Record what was measured in [results.md](results.md) and, if a rule
    changed, in [control-law.md](control-law.md).
+6. Publish from a clean, pushed tree: `sh module/build-zip.sh`, then
+   `gh release create v<version> build/astra-governor-<version>.zip` with notes
+   on what changed and what was measured. Both scripts build with `-trimpath`
+   from the same commit, so the release's `astrad2` is byte for byte the one
+   installed in step 4 (compare `sha256sum /data/adb/modules/astra/astrad2`).
