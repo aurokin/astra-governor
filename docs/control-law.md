@@ -128,15 +128,28 @@ The vendor cuts the CPU maximums in one large step (3532/4320 to 2400/2842 MHz
 in Rise) when the board sensor reaches 49 C, and keeps the cut on for minutes
 once the case is warm. The heat control projects the board temperature 90
 seconds ahead from the last minute's slope. When that passes 48 C it lowers
-the CPU maximums one table entry every 30 seconds, no lower than the vendor's
-own first cut, and gives entries back two minutes after the board is clear. It
-acts only in Rise: in Balance there is one table entry between the mode's
-ceiling and the vendor's cut at 41 C.
+the GPU's maximum from 1100 to 967 MHz, then the CPU maximums one table entry
+every 30 seconds, no lower than the vendor's own first cut. CPU entries come
+back two minutes after the board is clear; the GPU's level only once the board
+is well clear (under 44 C), so a game it holds under the target runs at one
+steady rate instead of switching every few minutes. It acts only in Rise: in
+Balance there is one table entry between the mode's ceiling and the vendor's
+cut at 41 C.
 
-In God of War II it kept the vendor's cut away for 28 minutes, three runs out
-of three, at 8.8 W against 10.2 W and the same late frames. It cannot help a
-game whose heat is the GPU's; there it lowers CPU maximums that cost nothing
-(measured: 0.3-0.6 fps above its neighbours, four blocks of four).
+The GPU goes first because its top level is the expensive one: the device
+tree puts 1100 MHz four voltage steps above 967 (`qcom,level` 448 against
+320), so the last 12% of clock costs a large share of the GPU's power. A GPU
+that has not run above 967 MHz in the last minute has nothing to give, and
+its step is taken together with the first CPU step. The GPU's maximum is
+written to `devfreq/max_freq`, a request of its own beside the vendor's
+`max_pwrlevel` and `thermal_pwrlevel`; the lowest wins. *Not yet measured on
+the tablet* (branch `gpu-first-heat`).
+
+In God of War II the CPU steps kept the vendor's cut away for 28 minutes,
+three runs out of three, at 8.8 W against 10.2 W and the same late frames. In
+a game whose heat is the GPU's, the CPU steps alone lower maximums that cost
+nothing (measured: 0.3-0.6 fps above its neighbours, four blocks of four);
+that is what the GPU step is for.
 
 ## Outside games (`-base 1152`)
 

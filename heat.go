@@ -15,10 +15,13 @@ import "time"
 // God of War II reaches 41 C after a quarter of an hour at 7 W, and between
 // Balance's own ceilings (2918/3072 MHz) and the cut there is one table entry.
 //
-// Two gentler things done sooner hold the sensor under that. First, GPU floor
-// the busy share does not call for is given up (see sample.thrifty): about a
-// watt in God of War II. Then CPU ceilings come down one table entry at a time,
-// as far as the vendor's own cut and no further.
+// Gentler things done sooner hold the sensor under that. First, GPU floor the
+// busy share does not call for is given up (see sample.thrifty): about a watt
+// in God of War II. Then the GPU's top level goes (1100 MHz; see
+// governor.cool), which is where a game the GPU limits spends its power, and
+// then CPU ceilings come down one table entry at a time, as far as the
+// vendor's own cut and no further. A GPU that has not been at its top level
+// has nothing to give, and its step is taken together with the first CPU one.
 //
 // The ceilings are written to scaling_max_freq, which on this kernel is a
 // request of its own: the vendor's limits (the mode's ceiling held by IFAS, the
@@ -44,11 +47,11 @@ type reading struct {
 	c  float64
 }
 
-// heat decides how many steps of CPU ceiling to give up to hold the sensor at
-// or under target.
+// heat decides how many steps of ceiling to give up to hold the sensor at or
+// under target: the GPU's top level first, then the CPU's.
 type heat struct {
 	target float64 // C; 0 leaves the ceilings and the GPU floor alone
-	max    int     // steps down to the vendor's own first cut; past it theirs is no worse than ours
+	max    int     // the GPU's step plus the CPU's down to the vendor's own first cut; past it theirs is no worse than ours
 	level  int
 	saving bool // close enough to the target that spare GPU floor is given up
 	hist   []reading
@@ -77,7 +80,8 @@ func (h *heat) ahead(now time.Time) float64 {
 	return recent + slope*heatAhead.Seconds()
 }
 
-func (h *heat) step(now time.Time, c float64) int {
+// gpuIdle says the GPU has not run at its top level for a while.
+func (h *heat) step(now time.Time, c float64, gpuIdle bool) int {
 	h.hist = append(h.hist, reading{now, c})
 	for now.Sub(h.hist[0].at) > heatWindow {
 		h.hist = h.hist[1:]
@@ -94,8 +98,16 @@ func (h *heat) step(now time.Time, c float64) int {
 	switch ahead := h.ahead(now); {
 	case ahead > h.target && h.level < h.max:
 		h.level, h.moved = h.level+1, now
-	case ahead < h.target-1 && c < h.target-0.5 && h.level > 0 && (since >= heatBack || !h.saving):
-		// Well clear of the target (a lighter game, or none) the steps come back quickly.
+		if h.level == 1 && gpuIdle {
+			h.level = min(2, h.max)
+		}
+	case ahead < h.target-1 && c < h.target-0.5 && h.level > 1 && since >= heatBack,
+		ahead < h.target-1 && c < h.target-0.5 && h.level > 0 && !h.saving:
+		// Well clear of the target (a lighter game, or none) the steps come back
+		// quickly. The GPU's step comes back only then: it is one big step, and a game
+		// it holds under the target can settle degrees under with it and over without
+		// it. Given back on a timer, such a game changed frame rate every few minutes
+		// for a few percent more frames on average; kept, it runs at one steady rate.
 		h.level, h.moved = h.level-1, now
 	}
 	return h.level

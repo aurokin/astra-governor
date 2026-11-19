@@ -53,7 +53,7 @@ above the vendor's current maximum.
 | Situation | What it does |
 | --- | --- |
 | A Game Space game in front, Eco, Balance or Rise | the control law runs: frames read twice a second, minimums set |
-| Rise, board heading for the vendor's cut | the heat control lowers CPU maximums a step at a time, no further than the vendor's own first cut |
+| Rise, board heading for the vendor's cut | the heat control takes the GPU from 1100 to 967 MHz, then lowers CPU maximums a step at a time, no further than the vendor's own first cut |
 | Diablo | stands down; the vendor pins every clock |
 | Anything else, screen on | holds the six performance cores' minimum at 1152 MHz (the vendor's is 384); watches no frames |
 | Screen off | nothing |

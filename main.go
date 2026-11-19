@@ -16,7 +16,8 @@
 //     at a high clock because two busy ones need it.
 //
 // With -heat it also keeps the tablet under the vendor's thermal cut in Rise
-// (heat.go), by giving up GPU floor and then CPU ceiling a little at a time.
+// (heat.go), by giving up GPU floor, then the GPU's top level, then CPU ceiling a
+// little at a time.
 //
 // With -base it also does one thing outside games, and nothing else there: it
 // holds the performance cores' minimum clock a little above the vendor's
@@ -53,6 +54,11 @@ const (
 	ifasParams = "/sys/module/ifas/parameters/"
 	ifasEnable = "/sys/kernel/ifas/ifas_enable"
 	kgsl       = "/sys/class/kgsl/kgsl-3d0/"
+	// The GPU's devfreq maximum is a frequency request of its own, like a
+	// cluster's scaling_max_freq: the vendor sets the mode's ceiling through
+	// max_pwrlevel instead and its thermal limit through thermal_pwrlevel, and
+	// the lowest of them wins.
+	gpuMaxFreq = kgsl + "devfreq/max_freq"
 	fanDir     = "/sys/kernel/fan/"
 	backlight  = "/sys/class/backlight/panel0-backlight/brightness"
 	cpufreq    = "/sys/devices/system/cpu/cpufreq/"
@@ -400,6 +406,8 @@ type governor struct {
 	heatC   float64            // the temperature to hold in Rise, 0 for none
 	thrifty bool               // give up spare GPU floor whatever the temperature
 	capKHz  map[string]int     // the ceiling we last asked for on each cluster, 0 if none
+	gpuCap  bool               // the GPU held one level under its top for heat
+	gpuTop  time.Time          // when the GPU last ran above its second level
 	fanMin  int                // the slowest fan level to allow in games, 1-5; 0 leaves the fan to the vendor
 	fanHot  bool               // run the fan at its top level while the tablet is at or near a thermal cut
 	nearCut bool               // it is
@@ -584,12 +592,28 @@ func (g *governor) uncap() {
 		write(cpufreq+p+"/scaling_max_freq", strconv.Itoa(t[len(t)-1]))
 	}
 	g.capKHz = map[string]int{}
+	write(gpuMaxFreq, strconv.Itoa(g.gpuMHz[0]*1000000))
+	g.gpuCap = false
 }
 
-// cool sets the fan and the CPU ceilings for the board sensor's temperature and
-// the ceiling level it calls for.
+// cool sets the fan and the ceilings for the board sensor's temperature and
+// the ceiling level it calls for. The first step is the GPU's: from its top
+// level to the next, 1100 to 967 MHz in Rise, which the device tree puts four
+// voltage steps lower (qcom,level 448 against 320): an eighth of the GPU's
+// clock for a large share of its power, and nothing at all to a game whose GPU
+// does not run that high. The CPU steps follow it.
 func (g *governor) cool(now time.Time, xoC float64, level int) {
 	g.fan(xoC, level)
+	if capped := level > 0; capped != g.gpuCap {
+		g.gpuCap = capped
+		mhz := g.gpuMHz[0]
+		if capped {
+			mhz = g.gpuMHz[1]
+		}
+		write(gpuMaxFreq, strconv.Itoa(mhz*1000000))
+		log.Printf("GPU ceiling %d MHz at %.1f C (heading for %.1f C)", mhz, xoC, g.heat.ahead(now))
+	}
+	level, cpuSteps := max(0, level-1), g.heat.max-1
 	for _, p := range policies {
 		t, cut := g.cpuFreqs[p], firstCut[p]
 		// Each cluster gives up the same share of the way down to the vendor's first cut.
@@ -597,7 +621,7 @@ func (g *governor) cool(now time.Time, xoC float64, level int) {
 		for i := len(t) - 1; i > 0 && t[i] > cut; i-- {
 			steps++
 		}
-		khz := t[len(t)-1-(level*steps+g.heat.max/2)/max(g.heat.max, 1)]
+		khz := t[len(t)-1-(level*steps+cpuSteps/2)/max(cpuSteps, 1)]
 		if level == 0 {
 			khz = 0
 		}
@@ -737,6 +761,9 @@ func (g *governor) limits() (cpu, gpu int) {
 		}
 	}
 	gpu = max(0, g.baseLevel()-readInt(kgsl+"max_pwrlevel"))
+	if g.gpuCap {
+		gpu = min(gpu, g.baseLevel()-1) // a floor above our own ceiling would override it
+	}
 	return cpu, min(gpu, len(g.c.gpuMHz)-1)
 }
 
@@ -767,7 +794,7 @@ func (g *governor) step() {
 		}
 	}
 	saving := g.heat.saving
-	st.HeatLevel = g.heat.step(now, st.XoC)
+	st.HeatLevel = g.heat.step(now, st.XoC, now.Sub(g.gpuTop) > heatWindow)
 	if st.HeatSaving = g.heat.saving; saving != g.heat.saving && g.game {
 		log.Printf("giving up spare GPU floor: %v at %.1f C", g.heat.saving, st.XoC)
 	}
@@ -870,6 +897,9 @@ func (g *governor) step() {
 		demand = r / 1000
 	}
 	g.cpuPrev, g.gpuPrev = cpuCur, gpuCur
+	if gpuNow > g.gpuMHz[1] {
+		g.gpuTop = now
+	}
 	gpuBusy := g.busySum / float64(max(g.busyN, 1))
 	g.busySum, g.busyN = 0, 0
 
@@ -973,7 +1003,7 @@ func main() {
 	logPath := flag.String("log", "", "write the log to this file, keeping one previous file, instead of stderr")
 	hold := flag.String("hold", "", "for experiments: hold these floors in games (\"cpuMHz,gpuMHz[,otherCoresMHz]\": the first is for the prime cores, and for the rest unless a third is given) instead of running the control law")
 	fanMin := flag.Int("fan", 0, "the slowest fan level to allow in games, 1-5 (the vendor runs 2 until the tablet is hot); 0 leaves the fan to the vendor")
-	heatC := flag.Float64("heat", 0, "in Rise, hold the board sensor (xo-therm) at or under this many C by giving up spare GPU floor and then CPU ceilings a step at a time; the vendor cuts the ceilings hard at 49. 0 leaves both alone")
+	heatC := flag.Float64("heat", 0, "in Rise, hold the board sensor (xo-therm) at or under this many C by giving up spare GPU floor, then the GPU's top level, then CPU ceilings a step at a time; the vendor cuts the ceilings hard at 49. 0 leaves both alone")
 	base := flag.Int("base", 0, "outside games, hold the six performance cores' minimum at this many MHz while the screen is on (the vendor's is 384); 0 leaves it alone")
 	fanHot := flag.Bool("fanhot", false, "run the fan at its top level while clocks are being cut for heat, or the board is within four degrees of the vendor's first cut; only ever faster than the vendor has it, and never when it is switched off")
 	thrifty := flag.Bool("thrifty", false, "give up GPU floor the GPU's busy share does not call for at any temperature, not only near -heat's target (content at the panel's rate whose CPU floor stays at its limit; see sample.thrifty)")
@@ -1028,7 +1058,9 @@ func main() {
 		}
 	}
 
-	// One step of ceiling per entry of the prime cores' table down to the vendor's first cut.
+	// The GPU's step, then one step of ceiling per entry of the prime cores' table
+	// down to the vendor's first cut.
+	g.heat.max = 1
 	for t, i := g.cpuFreqs["policy6"], len(g.cpuFreqs["policy6"])-1; i > 0 && t[i] > firstCut["policy6"]; i-- {
 		g.heat.max++
 	}
