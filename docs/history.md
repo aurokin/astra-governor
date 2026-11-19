@@ -70,6 +70,12 @@ Other changes in the same rewrite:
   (discussed 11-16). Governed Rise games ran with the GPU at a median of
   512 MHz, and in 171 Balance runs the 832 MHz ceiling never held a governed
   game back: no frames to gain, only heat.
+- **The GPU's top level first in the heat control** (11-18, branch
+  `gpu-first-heat`): 1100 to 967 MHz before any CPU step, kept until the
+  board is well clear. In the heavy race it delayed the vendor's cut by about
+  three minutes only by running slower, for 1-2.5 W less and 2-3% fewer
+  frames; the race is too hot even at 967 MHz. See
+  [results](results.md#heat-and-the-fan).
 - **Rejected without a trial**: writing the panel controller's flash, and any
   further panel register traffic.
 

@@ -163,6 +163,14 @@ There are two separate settings.
   the in-game overlay writes it. The assistant rewrites the file from memory,
   so it has to be stopped before the file is edited.
 
+**The vendor lowers a game's rate when hot.** A third component,
+recorded in the global setting `ScreenRefreshRateController_resultFps`, took a
+165 Hz game to 120 Hz with the board (`xo-therm`) at 48.5-50 C, in four 30-minute
+runs out of four on 2026-11-18; Android's display votes did not change. On
+11-16 the same race held 165 Hz for 15-20 minutes at 50.1-50.5 C, so the
+trigger is not the board sensor alone; what else it reads is not known. It
+only drops to 120: a game set to 120 stays there.
+
 Twice the system setting was found switched to 60 Hz by itself, once after a
 sequence of mode changes including Diablo and once between two test sessions
 with no game starting or stopping. The cause is not known.

@@ -190,6 +190,23 @@ God of War II for 28 minutes (`heat1`-`heat6`), a synthetic GPU-heavy load for
     above the board in every block, the fan off included;
   - four matched-start runs of the heavy race (`fan2`): GPU capped from 2.4-3.1
     minutes, 94.5-96.5 fps, either level.
+- **The GPU's top level given up first** (branch `gpu-first-heat`,
+  `gpufirst1`-`gpufirst3`, 2026-11-18): the heavy race for 30 minutes at
+  165 Hz, the heat control taking the GPU from 1100 to 967 MHz before any CPU
+  step. One valid pair (`gpufirst2`); the other runs were spoilt by the
+  vendor's drop to 120 Hz or a system-update notice over the game.
+
+  | | Installed build | GPU-first |
+  | --- | --- | --- |
+  | Minutes 0-7 | ~99 fps, 15-17 W, GPU 1100 MHz | ~96 fps, 13-13.5 W, GPU 967 MHz |
+  | Vendor's GPU cut (832 MHz) | from minute 4, 74% of the run | from minute 7, 74% of the run |
+  | Whole run | 91.5 fps, 12.5 W | 88.6 fps, 11.6 W |
+
+  The race is too hot to hold under the cut even at 967 MHz. The cut comes
+  later because the GPU was already slower, so the step trades 2-3% of frames
+  for 1-2.5 W, which a frame cap would also do. Not adopted. Starting skin
+  temperatures were 26.8 and 31.2 C: weak evidence. The cap itself works:
+  `devfreq/max_freq` held the GPU at 967 MHz throughout (`gpucap0`).
 - **Unexplained cooling spells**: several times the board, skin and battery
   fell 2-5 C over 5-12 minutes at an unchanged load, fan speed and clocks.
   Room air moving across the tablet's back is a guess.
