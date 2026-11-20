@@ -976,13 +976,14 @@ func main() {
 	heatC := flag.Float64("heat", 0, "in Rise, hold the board sensor (xo-therm) at or under this many C by giving up spare GPU floor and then CPU ceilings a step at a time; the vendor cuts the ceilings hard at 49. 0 leaves both alone")
 	base := flag.Int("base", 0, "outside games, hold the six performance cores' minimum at this many MHz while the screen is on (the vendor's is 384); 0 leaves it alone")
 	fanHot := flag.Bool("fanhot", false, "run the fan at its top level while clocks are being cut for heat, or the board is within four degrees of the vendor's first cut; only ever faster than the vendor has it, and never when it is switched off")
+	statePath := flag.String("state", "", "remember /enable and /disable in this file, so a restart or a reboot keeps the choice; without it every start is enabled")
 	thrifty := flag.Bool("thrifty", false, "give up GPU floor the GPU's busy share does not call for at any temperature, not only near -heat's target (content at the panel's rate whose CPU floor stays at its limit; see sample.thrifty)")
 	flag.Parse()
 	if *logPath != "" {
 		log.SetOutput(&logFile{path: *logPath})
 	}
 
-	g := &governor{enabled: !*monitor, stock: map[string]string{}, cpuFreqs: map[string][]int{}, fanMin: *fanMin, fanHot: *fanHot, thrifty: *thrifty}
+	g := &governor{enabled: !*monitor && (*statePath == "" || read(*statePath) != "off"), stock: map[string]string{}, cpuFreqs: map[string][]int{}, fanMin: *fanMin, fanHot: *fanHot, thrifty: *thrifty}
 	g.heatC = *heatC
 	if *hold != "" {
 		g.hold = []int{0, 0, 0}
@@ -1047,7 +1048,13 @@ func main() {
 		return func(w http.ResponseWriter, r *http.Request) {
 			g.mu.Lock()
 			g.enabled = on
+			g.st.Enabled = on // a status read before the next tick already shows the change
 			g.mu.Unlock()
+			if *statePath != "" {
+				if err := os.WriteFile(*statePath, []byte(map[bool]string{true: "on\n", false: "off\n"}[on]), 0600); err != nil {
+					log.Printf("remember %s: %v", *statePath, err)
+				}
+			}
 			fmt.Fprintln(w, map[bool]string{true: "enabled", false: "disabled"}[on])
 		}
 	}
