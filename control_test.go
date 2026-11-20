@@ -33,6 +33,17 @@ type game struct {
 	// Work per frame done in turn with the rest by threads other than the busiest,
 	// which no busy share the controller sees accounts for.
 	hiddenMs float64
+	// With its work filling more than this share of the time a frame has, a frame
+	// now and then misses its refresh and the next makes up for it: three in two
+	// seconds, at an unchanged rate. Zero means never.
+	tight float64
+}
+
+// fill is the share of the time a frame has that its work takes at these clocks.
+func (g game) fill(cpuMHz, gpuMHz int) float64 {
+	ct := g.cpuMs * float64(cpuTable[len(cpuTable)-1]) / float64(cpuMHz)
+	gt := g.gpuMs * float64(gpuTable[len(gpuTable)-1]) / float64(gpuMHz)
+	return (ct + gt + g.hiddenMs) * g.fps / 1000
 }
 
 func (g game) run(cpuMHz, gpuMHz int) (fps, hot, gpu float64) {
@@ -74,6 +85,11 @@ type rig struct {
 	thrifty  bool
 	gpuSum   int  // GPU floor summed over ticks, MHz
 	steady   bool // stream() delivers every frame on time: a light game, not a stream
+	// When each frame of the last six seconds that was held a refresh too long was
+	// shown: the ones the panel's drift forces, and a tight game's late ones.
+	longAt       []time.Time
+	drift, pairs float64 // fractions of the next such frame of either kind
+	tightTick    int     // ticks on which the floors left the game late that way
 }
 
 func newRig() *rig {
@@ -144,7 +160,23 @@ func (r *rig) tick(g game) float64 {
 	if len(r.gpuSeen) > 7 {
 		r.gpuSeen = r.gpuSeen[1:]
 	}
-	a := r.c.step(sample{now: r.now, flowing: true, fps: fps, fps6: sum / float64(len(r.hist)), fpsNow: fpsNow, panelHz: panel, lockK: k, lockedFor: r.locked,
+	if whole, forced := wholeHold(panel, fps); whole > 0 {
+		r.drift += forced / 2
+		if g.tight > 0 && g.fill(cpuTable[r.c.cpu], gpuTable[r.c.gpu]) > g.tight {
+			r.pairs += 0.75
+			r.tightTick++
+		}
+		for ; r.drift >= 1; r.drift-- {
+			r.longAt = append(r.longAt, r.now)
+		}
+		for ; r.pairs >= 1; r.pairs-- {
+			r.longAt = append(r.longAt, r.now)
+		}
+	}
+	for len(r.longAt) > 0 && r.now.Sub(r.longAt[0]) >= 6*time.Second {
+		r.longAt = r.longAt[1:]
+	}
+	a := r.c.step(sample{now: r.now, flowing: true, fps: fps, fps6: sum / float64(len(r.hist)), fpsNow: fpsNow, panelHz: panel, lockK: k, lockedFor: r.locked, long6: len(r.longAt),
 		gpuBusy: r.gpuSeen[0], hotBusy: hot, cpuNow: cpuTable[r.c.cpu], gpuNow: gpuTable[r.c.gpu], demand: demand, cpuLimit: r.limits[0], gpuLimit: r.limits[1], thrifty: r.thrifty})
 	r.gpuSum += gpuTable[r.c.gpu]
 	r.actions = append(r.actions, a)
@@ -753,5 +785,61 @@ func TestGameThatHoldsItsRateWithAFullGPUIsStillJudgedByItsFrames(t *testing.T) 
 	}
 	if r.c.target != 30 {
 		t.Errorf("target %.1f, want the 30 fps it holds", r.c.target)
+	}
+}
+
+// Xenoblade at 30 fps: bursts keep the CPU floor up, and the GPU floor can go
+// to the bottom of its table without a frame being lost. There a frame a
+// second misses its refresh and the next makes up for it, which no rate shows.
+func TestThirtyThatIsLateAndCatchesUpIsNotLeftOnThoseFloors(t *testing.T) {
+	g := game{cpuMs: 9, gpuMs: 5, fps: 29.97, burstMHz: 2918, tight: 0.8}
+	if fill := g.fill(cpuTable[len(cpuTable)-1], gpuTable[0]); fill <= g.tight || fill >= 1 {
+		t.Fatalf("the game fills %.2f of a frame at the lowest GPU floor; it has to be tight there without losing frames", fill)
+	}
+	r := newRig()
+	r.run(g, 3)
+	r.lateTick = 0
+	r.run(g, 300)
+	if r.c.gpu == r.limits[1] {
+		t.Errorf("GPU floor still at its limit after five minutes; nothing was economised")
+	}
+	if r.lateTick != 0 {
+		t.Fatalf("%d half-seconds short of frames; the game was to stay at its rate throughout", r.lateTick)
+	}
+	// One trial finds the edge: the six seconds it takes to count, and no more.
+	if r.tightTick > 16 {
+		t.Errorf("late and catching up for %d of 600 half-seconds", r.tightTick)
+	}
+	if n := r.count("undo-trial"); n != 1 {
+		t.Errorf("%d trials undone, want the one that found the edge", n)
+	}
+}
+
+func TestFramesThePanelForcesToHoldLongerAreNotLateness(t *testing.T) {
+	c := newController(cpuTable, gpuTable)
+	now := time.Unix(1000, 0)
+	limits := [2]int{len(cpuTable) - 1, len(gpuTable) - 1}
+	feed := func(long6 int) string {
+		now = now.Add(500 * time.Millisecond)
+		// Busy shares too high for the last steps down, so the floors come to rest below the limits.
+		return c.step(sample{now: now, flowing: true, fps: 29.97, fps6: 29.97, fpsNow: 29.97, panelHz: panel, long6: long6, gpuBusy: 0.3, hotBusy: 0.3,
+			cpuNow: cpuTable[c.cpu], gpuNow: gpuTable[c.gpu], cpuLimit: limits[0], gpuLimit: limits[1]})
+	}
+	// 29.97 fps drifts a refresh against this panel every three seconds: two in any six.
+	_, forced := wholeHold(panel, 29.97)
+	most := int(math.Ceil(6 * forced))
+	if most != 2 {
+		t.Fatalf("the panel forces %d long holds in six seconds, want 2", most)
+	}
+	for i := 0; i < 240; i++ {
+		if a := feed(most + heldLate - 1); strings.HasPrefix(a, "rescue") || strings.HasPrefix(a, "undo") || a == "uneven" {
+			t.Fatalf("action %q with no more frames held long than drift and a stray pair account for", a)
+		}
+	}
+	if c.cpu == limits[0] && c.gpu == limits[1] {
+		t.Fatalf("still at ample clocks after two minutes")
+	}
+	if a := feed(most + heldLate); !strings.HasPrefix(a, "rescue") && !strings.HasPrefix(a, "undo") {
+		t.Errorf("action %q with %d frames held long in six seconds, want the floors to answer for it", a, most+heldLate)
 	}
 }

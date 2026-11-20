@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -214,6 +215,21 @@ const (
 	boundLate      = 3    // late ticks at the limits within driftFor
 	boundStepTicks = 2
 	boundHold      = time.Minute // how long the floor just under which the GPU went short is kept, at first
+	// Content below the panel's rate whose frames each hold a whole number of
+	// refreshes (30 fps on a 60 Hz panel) can be late without losing a frame: one
+	// frame misses its refresh and is held one longer, the next is ready early
+	// and held one shorter, and every rate stays where it was. Xenoblade at
+	// 30 fps with the GPU floor at 222 MHz showed about one such pair a second
+	// (61-70% of seconds clean, against 94-100% from 434 MHz up) and no lateness
+	// the rates could show. For such content frames held a refresh too long are
+	// counted as well. The panel's own drift forces some (one every three
+	// seconds for 29.97 fps at 60.27 Hz); this many more than those within six
+	// seconds is late. On 1,082 half-seconds recorded at floors that carried
+	// the game the count never got there; at 222 MHz it did on seven in eight.
+	heldLate = 3
+	// The count needs up to six seconds to show what a step down did, so a step
+	// answers for it this long. Careful steps are ten seconds apart.
+	heldUndo = 9 * time.Second
 	// Below this the stock CPU governor is slow to leave its low clocks for work
 	// that comes in a short burst per frame: outside games, played video lost a
 	// frame a second at 570 MHz and a fifth of that from 1152 MHz up.
@@ -239,8 +255,11 @@ type sample struct {
 	// and has done for lockedFor.
 	lockK     int
 	lockedFor time.Duration
-	cpuLimit  int // highest CPU floor index the vendor's current caps allow
-	gpuLimit  int // highest GPU floor index the vendor's current ceiling allows
+	// Frames of the last six seconds held at least one refresh longer than
+	// wholeHold says content at the target's rate holds them; 0 where it says none.
+	long6    int
+	cpuLimit int // highest CPU floor index the vendor's current caps allow
+	gpuLimit int // highest GPU floor index the vendor's current ceiling allows
 	// The board is close to the vendor's thermal cut. In a game that keeps the
 	// CPU floor at its limit, a GPU floor above what the GPU's busy share
 	// calls for is then the cheapest heat to give up: late frames push the floor there on suspicion
@@ -248,6 +267,25 @@ type sample struct {
 	// and no fewer late frames), and the next thing to go would be CPU clock that
 	// is known to matter.
 	thrifty bool
+}
+
+// wholeHold returns how many refreshes content at `target` holds each frame
+// for when that is a whole number of two or more, and how many frames a
+// second the panel then forces to hold one refresh longer because its clock
+// and the content's drift apart. k is 0 for anything else: content at the
+// panel's rate, where a late frame is a lost one and the rates show it, and
+// content that does not divide the panel's rate (25 fps at 60 Hz), whose
+// holds alternate between two lengths whatever the clocks.
+func wholeHold(panelHz, target float64) (k int, forced float64) {
+	if panelHz <= 0 || target <= 0 {
+		return 0, 0
+	}
+	ratio := panelHz / target
+	k = int(math.Round(ratio))
+	if k < 2 || math.Abs(ratio-float64(k)) > 0.03 {
+		return 0, 0
+	}
+	return k, math.Max(0, ratio-float64(k)) * target
 }
 
 func newController(cpuMHz, gpuMHz []int) *controller {
@@ -535,11 +573,17 @@ func (c *controller) step(s sample) (action string) {
 	// While a late frame already dealt with is still inside the one-second rate,
 	// only the newest frames can show that lateness goes on.
 	late := (c.target-s.fpsNow)*0.4 >= shortNow
+	held := false // late by frames held too long, which no rate shows: see heldLate
 	if c.deaf > 0 {
 		c.deaf--
 	} else {
-		late = s.fps < c.target*(1-lateNow) ||
-			(s.now.Sub(c.lateSince) >= 6*time.Second && s.fps6 < c.target*(1-lateSustained))
+		sustained := s.now.Sub(c.lateSince) >= 6*time.Second
+		// Not against a target that is still a one-second count: what the panel
+		// forces is worked out from it.
+		if k, forced := wholeHold(s.panelHz, c.target); k > 0 && sustained && !c.rough {
+			held = s.long6 >= int(math.Ceil(6*forced-1e-9))+heldLate
+		}
+		late = s.fps < c.target*(1-lateNow) || (sustained && s.fps6 < c.target*(1-lateSustained)) || held
 	}
 	if !late {
 		c.lateRun = 0
@@ -577,7 +621,7 @@ func (c *controller) step(s sample) (action string) {
 			}
 			// A late frame with nothing more to give is the game's own.
 			return "uneven"
-		case c.lateRun == 1 && s.now.Sub(c.lastDown) < 3*time.Second && c.lastDownTo == [2]int{c.cpu, c.gpu}:
+		case c.lateRun == 1 && (s.now.Sub(c.lastDown) < 3*time.Second || (held && s.now.Sub(c.lastDown) < heldUndo)) && c.lastDownTo == [2]int{c.cpu, c.gpu}:
 			// The step we just took was one too many. Undo it and leave that setting
 			// alone for a while, longer each time it fails.
 			c.fail(c.lastDownTo, s.now)

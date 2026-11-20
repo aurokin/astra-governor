@@ -65,6 +65,24 @@ setting is left alone for 30 s, doubling each time it fails.
 Lateness is judged against the panel's measured rate, so a 59.94 fps game on
 a 60.27 Hz panel repeating a frame every three seconds is not late.
 
+**Late without losing a frame** (`heldLate`). Content below the panel's rate
+whose frames each hold a whole number of refreshes (30 fps on a 60 Hz panel,
+60 fps on a 120 Hz one) can be late and make up for it: one frame misses its
+refresh and is held one longer, the next is ready early and is held one
+shorter, and every rate stays where it was. Xenoblade at 30 fps with the GPU
+minimum at 222 MHz showed about one such pair a second, 61-70% of seconds
+clean against 94-100% from 434 MHz up, and nothing the rates could show; the
+law took the minimum there on a trial and stayed.
+
+For such content the law also counts frames held a refresh too long over the
+last six seconds. The panel's own drift forces some (one every three seconds
+for 29.97 fps at 60.27 Hz, none on a calibrated panel); three more than those
+is late. A step down answers for that for nine seconds instead of three, since
+the count needs up to six to show. It is not applied at the panel's rate,
+where a late frame is a lost one and the rates show it, nor to content that
+does not divide the panel's rate (25 fps at 60 Hz), whose holds alternate
+between two lengths whatever the clocks.
+
 **A target counted high.** The target is first a one-second count, replaced by
 the six-second rate after six seconds on time. A count 1-2.5% high (62 frames
 for 60.3) made every six-second stretch look late and kept the minimums at the
@@ -161,6 +179,7 @@ neither.
 | --- | --- | --- |
 | `learnTicks` | 4 | two seconds at ample clocks before trusting the rate |
 | `lateNow` / `lateSustained` | 2.5% / 1.1% | one-second / six-second shortfall that counts as late |
+| `heldLate` | 3 | frames held a refresh too long in six seconds, beyond the panel's own, that count as late |
 | `slowDownTicks` / `fastDownTicks` | 20 / 2 | on-time ticks before a careful / a quick step |
 | `slack` | 0.80 | busy share a step must leave at the heaviest recent moment |
 | `overlap` | 1.10 | busy shares adding up past this prove side-by-side work |

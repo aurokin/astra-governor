@@ -344,6 +344,7 @@ type status struct {
 	PanelHz   float64 `json:"panel_hz"`
 	LockK     int     `json:"lock_k"`
 	LockedS   float64 `json:"locked_s"`
+	Long6     int     `json:"long_holds_6s"` // frames of the last six seconds held a refresh too long, where the law counts them
 	CPUFloor  int     `json:"cpu_floor_mhz"`
 	GPUFloor  int     `json:"gpu_floor_mhz"`
 	CPULimit  int     `json:"cpu_limit_mhz"`
@@ -878,11 +879,15 @@ func (g *governor) step() {
 	if g.f.periodNs > 0 {
 		panelHz = 1e9 / g.f.periodNs
 	}
+	long6 := 0
+	if k, _ := wholeHold(panelHz, g.c.target); k > 0 {
+		long6 = g.f.longer(6*time.Second, (float64(k)+0.5)*g.f.periodNs)
+	}
 	action := "hold"
 	if g.hold == nil {
 		action = g.c.step(sample{now: now, flowing: flowing, fps: fps, fps6: fps6, fpsNow: fpsNow, panelHz: panelHz,
 			gpuBusy: gpuBusy, hotBusy: hotBusy, cpuNow: cpuNow, gpuNow: gpuNow, demand: demand,
-			lockK: g.f.curHold, lockedFor: lockedFor, cpuLimit: cpuLimit, gpuLimit: gpuLimit, thrifty: g.heat.saving || g.thrifty})
+			lockK: g.f.curHold, lockedFor: lockedFor, long6: long6, cpuLimit: cpuLimit, gpuLimit: gpuLimit, thrifty: g.heat.saving || g.thrifty})
 	} else {
 		g.c.cpu, g.c.gpu = 0, 0
 		for i, f := range g.c.cpuMHz[:cpuLimit+1] {
@@ -904,7 +909,7 @@ func (g *governor) step() {
 
 	st.Layer, st.State, st.Action = g.f.layer, g.c.state.String(), action
 	st.FPS, st.FPS6, st.Target, st.PanelHz = fps, fps6, g.c.target, panelHz
-	st.LockK, st.LockedS = g.f.curHold, lockedFor.Seconds()
+	st.LockK, st.LockedS, st.Long6 = g.f.curHold, lockedFor.Seconds(), long6
 	st.CPUFloor, st.GPUFloor = g.c.cpuMHz[g.c.cpu], g.c.gpuMHz[g.c.gpu]
 	st.CPULimit, st.GPULimit = g.c.cpuMHz[cpuLimit], g.c.gpuMHz[gpuLimit]
 	st.CPUNow, st.GPUNow, st.GPUBusy = cpuNow, gpuNow, gpuBusy
