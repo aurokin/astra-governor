@@ -5,9 +5,22 @@ Building, installing, checking and measuring a change.
 ## Build and test
 
 ```sh
-go test ./...                                   # the control law, heat control and fan decision against models
-go vet ./...
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o build/astrad2 .
+sh module/build.sh       # test and build everything into build/
+sh module/build-zip.sh   # the same, then build/astra-<version>.zip
+```
+
+`build.sh` needs Go, Java 17 or later, Python 3 and the Android SDK's
+build-tools 36.0.0 and platform 36 (`ANDROID_HOME`, by default
+`/opt/homebrew/share/android-commandlinetools`). No Gradle. The same commit
+and signing key give the same zip, byte for byte.
+
+The parts on their own:
+
+```sh
+go test ./... && go vet ./...                   # the governor: control law, heat control and fan decision against models
+(cd panel && go test ./... && go vet ./...)     # calibration service: readiness, retries, the preference file
+python3 panel/test_panel_table.py               # calibration helper against an emulated controller
+sh app/build.sh                                 # the app, build/app/astra.apk
 ```
 
 The tests are the control law's specification: each encodes a behaviour that
@@ -16,21 +29,45 @@ held at ample clocks, bursts met by the floor...) and names it. A change to
 `control.go` that fails one needs a reason, not a new expected value. Most were
 checked by breaking the rule they cover and seeing them fail.
 
+`panel/test_panel_table.py` runs the real `panel-table.sh` with the
+controller's registers replaced by files: every preset from every other,
+a write that fails half-way, a mode change that is interrupted, a value in
+the controller that nobody owns. It is the only way to exercise the helper
+without sending anything to a panel, and it should pass before a changed
+helper goes near one ([hazards](display.md#hazards)).
+
+**The app's signing key is not in the repository.** `app/build.sh` reads it
+from `$KEYSTORE` (by default `~/workspace/astra-root/governor/app/debug.keystore`
+on the development Mac). Without one it signs with a throwaway key, and
+Android will refuse to install that build over an app signed with the real
+one.
+
 ## Install on the tablet
 
 ```sh
-sh module/install.sh            # build, copy into the installed module, restart; no reboot
-sh module/build-zip.sh          # build/astra-governor-<version>.zip, for a fresh install from the Magisk app
+sh module/install.sh            # build, copy both daemons into the installed module, restart them; no reboot
+sh module/build-zip.sh          # build/astra-<version>.zip, for a fresh install from the Magisk app
 SERIAL=... sh module/install.sh # another device
+adb install -r build/app/astra.apk   # the app alone
 ```
 
-`install.sh` needs the module to be installed already; a fresh device takes
-the zip. On the tablet:
+`install.sh` needs the module to be installed already, and calibration
+switched off in the app (it will not replace the service while the panel
+holds calibrated timing); a fresh device takes the zip. To install the zip
+from a computer exactly as the Magisk app would:
 
 ```sh
-adb shell su -c 'curl -s 127.0.0.1:7878/status'    # live state: action, target, floors, temperatures
-adb shell su -c 'curl -s 127.0.0.1:7878/disable'   # off until /enable or a restart
+adb push build/astra-0.4.zip /data/local/tmp/ && adb shell su -c 'magisk --install-module /data/local/tmp/astra-0.4.zip'
+```
+
+On the tablet:
+
+```sh
+adb shell su -c 'curl -s 127.0.0.1:7878/status'       # governor: action, target, floors, temperatures
+adb shell su -c 'curl -s 127.0.0.1:7878/disable'      # off, and remembered, until /enable
 adb shell su -c 'tail -f /data/adb/astra/astrad2.log'
+adb shell su -c 'curl -s 127.0.0.1:7879/calibration'  # calibration: enabled, rate, state, message
+adb shell su -c 'tail -f /data/adb/astra-panel-rate/service.log'
 ```
 
 The log names every action with the sample that caused it, for example
@@ -121,18 +158,58 @@ Polling SurfaceFlinger costs a `dumpsys` fork four times a second (the daemon
 does it twice). Power on the cable is the tablet's draw only while the battery
 is not charging.
 
+## Working on the app
+
+The app is plain Java against the platform, no libraries, built by
+`app/build.sh` in a few seconds. It can be looked at without the tablet: in
+an emulator, with the two daemons stood in for by any HTTP server answering
+`/status` and `/calibration` on the host and `adb reverse tcp:7878 ...` and
+`tcp:7879 ...` pointing the emulator at it. The emulator has no calibration
+service, so saving works and the state line reports whatever the stand-in
+says.
+
+| File | What is in it |
+| --- | --- |
+| `MainActivity.java` | the one screen: both panes, what each shows in each state |
+| `CalibrationStore.java` | the calibration choice: the four presets and the file the service reads |
+| `Daemons.java` | the two loopback endpoints |
+| `VsyncMeter.java` | the panel's real rate from Android's vsync timestamps |
+| `Ui.java`, `PresetRow.java` | colours, type and the view shapes |
+
+## Checking a firmware update
+
+A new RedMagicOS build needs both halves looked at again before the module
+says it supports it.
+
+- **The governor** runs on any build with the same kernel interfaces.
+  `recorder/handover.py`, then `sweeps/real.sh` against stock, as in
+  [results.md](results.md#redmagicos-1108mr1).
+- **Calibration refuses a build it does not know**, in two places:
+  `supported()` in `panel/main.go` and the `case` at the top of
+  `panel/panel-table.sh`. Before adding a build to both: measure the five
+  factory rates at the pin with the module off, read the ten factory words,
+  prove one mode's change and its restoration, then measure every rate with
+  the service. The 11.0.8MR1 record is
+  `~/workspace/astra-root/evidence/astra-migration-20261119/`, and the
+  procedure for updating a rooted tablet without losing root is
+  `~/workspace/astra-root/governor/OS-UPDATE.md`.
+
 ## Releasing
 
-1. `go test ./...` and `go vet ./...`.
+1. `sh module/build.sh`: every test passes.
 2. `recorder/handover.py` on the tablet.
 3. A `builds.sh` comparison against the installed build on the scenes the
    change could affect, and on the default set if it touches the control law.
-4. Bump `version` and `versionCode` in `module/module.prop`, commit, then
-   `sh module/install.sh`.
+   For a change to calibration: every rate at the pin, a boot, four wakes and
+   switching off, as in [display.md](display.md#measured-and-not-measured).
+4. Bump `version` and `versionCode` in `module/module.prop` and
+   `app/AndroidManifest.xml`, commit, then `sh module/install.sh`.
 5. Record what was measured in [results.md](results.md) and, if a rule
    changed, in [control-law.md](control-law.md).
 6. Publish from a clean, pushed tree: `sh module/build-zip.sh`, then
-   `gh release create v<version> build/astra-governor-<version>.zip` with notes
-   on what changed and what was measured. Both scripts build with `-trimpath`
-   from the same commit, so the release's `astrad2` is byte for byte the one
-   installed in step 4 (compare `sha256sum /data/adb/modules/astra/astrad2`).
+   `gh release create v<version> build/astra-<version>.zip` with notes on what
+   changed and what was measured. Both scripts build with `-trimpath` from the
+   same commit, so the release's daemons are byte for byte the ones installed
+   in step 4 (compare `sha256sum /data/adb/modules/astra/astrad2`).
+7. Install that zip on the tablet from the Magisk app, reboot, and check both
+   panes of the app.

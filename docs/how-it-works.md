@@ -1,9 +1,14 @@
 # How it works
 
-The vendor's system, where astra-governor fits in it, and how it works, in
+The vendor's system, where the governor fits in it, and how it works, in
 three depths: the first section in a minute, this page in ten, and
 [the vendor's system](vendor-system.md) and [the control law](control-law.md)
 for everything measured about each.
+
+This page is about the governor, the half of the module that manages clocks.
+The other half, display calibration, shares nothing with it but the module
+and the app; [the display](display.md#how-calibration-works) explains it.
+[The module](#the-module) at the end is how the two are packaged.
 
 ## In one minute
 
@@ -70,7 +75,7 @@ above the vendor's current maximum.
 | The stock CPU and GPU governors | nothing; they choose the clock above the minimum |
 | Thermal limits | nothing. A minimum is never set above the vendor's current maximum; a maximum of its own (heat control) is only ever lower than the vendor's |
 | Fan | nothing unless `-fan` or `-fanhot` is given |
-| Panel | nothing |
+| Panel | nothing; display calibration is a separate daemon ([display.md](display.md)) |
 
 IFAS stays loaded and switched on. Its other parameters, its frame
 measurement and its GPU behaviour are left alone, and its four values go back
@@ -121,7 +126,9 @@ Every half second, while a game scene is active:
   scene ends it puts back Diablo's pins if the vendor's switch to Diablo landed
   under its own restore.
 - `/enable` and `/disable` on `127.0.0.1:7878` switch control on and off
-  without stopping the daemon.
+  without stopping the daemon. With `-state FILE` (the module passes it) the
+  choice is kept in that file, so a restart or a reboot starts as it was left.
+  This is the switch in the Astra app.
 
 These hand-overs are what `recorder/handover.py` in the test bench checks on
 the tablet; see [development.md](development.md#checking-a-build-on-the-tablet).
@@ -135,5 +142,50 @@ the tablet; see [development.md](development.md#checking-a-build-on-the-tablet).
 | `main.go` | sensing, sysfs, game-scene tracking, hand-back, fan, the non-game floor, HTTP status and flags |
 | `fan_test.go` | the fan level decision |
 | `clock_linux.go`, `clock_other.go` | `CLOCK_MONOTONIC`, to match SurfaceFlinger's timestamps |
-| `module/` | the Magisk module: `service.sh` (start at boot, restart if it dies), `module.prop`, `install.sh` and `switch.sh` (update from a computer) |
+| `panel/` | display calibration: `main.go`, `calibration.go` (the service), `panel-table.sh` (the helper), `mode/PanelMode.java` (the mode change), and their tests. A Go module of its own |
+| `app/` | the settings app: plain Java, no libraries, built by `app/build.sh` |
+| `module/` | the Magisk module: `service.sh`, `customize.sh`, `uninstall.sh`, `module.prop`; `build.sh` and `build-zip.sh` (build everything, make the zip); `install.sh` and `switch.sh` (update the daemons from a computer) |
 | `tools/results.py` | tables from the measured runs in `data/` |
+
+## The module
+
+One Magisk module, id `astra`, carries both halves and the app:
+
+| In the zip | What it is |
+| --- | --- |
+| `astrad2` | the governor daemon (the Go program at the top of this repository) |
+| `panel-service`, `panel-table.sh`, `panel-mode.jar` | display calibration (`panel/`): the service, the helper that talks to the panel's controller, and the momentary mode change |
+| `Astra.apk` | the settings app (`app/`), installed by `customize.sh` |
+| `service.sh` | starts both daemons once Android has booted and restarts either if it exits |
+| `customize.sh` | run by Magisk at install: refuses any device but the NP05J, installs the app, retires the old separate calibration module |
+| `uninstall.sh` | run by Magisk after removal: clears the module's files under `/data/adb` and uninstalls the app |
+
+How the pieces talk:
+
+```
+Astra app ──── GET 127.0.0.1:7878/status, /enable, /disable ───────── astrad2
+    │
+    ├───────── GET 127.0.0.1:7879/calibration (read-only) ─────────── panel-service
+    │                                                                      │ reads
+    └── writes "on 60" / "off 59.94" ... to panel-calibration.conf ────────┘
+        in its own device-protected storage
+```
+
+The app runs without root and can change exactly two things: the governor's
+on/off state, by asking the daemon, and its own calibration file. The
+calibration service will only act on a file that is a plain file owned by the
+app, not writable by others, and holding one of the eight records it knows.
+While calibration is off and nothing of its own is in the controller, the
+service looks at that file every ten seconds, or at once when the app asks
+for its status.
+
+On the tablet:
+
+| Path | What |
+| --- | --- |
+| `/data/adb/modules/astra/` | the module |
+| `/data/adb/astra/astrad2.log` | the governor's log, one previous file kept |
+| `/data/adb/astra/governor` | `on` or `off`: the governor's remembered switch |
+| `/data/adb/astra-panel-rate/service.log` | the calibration service's log |
+| `/data/adb/astra-panel-rate/table-session` | the helper's journal: present while calibration owns timing words in the controller |
+| `/data/user_de/0/dev.auro.astra/files/panel-calibration.conf` | the calibration choice |

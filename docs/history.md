@@ -14,7 +14,9 @@ Dates are 2026.
 | 11-14 | First full comparison (`real2`); astra-governor installed as the tablet's governor; hand-over checks |
 | 11-15 | Heat control (`-heat 48`); the thrifty GPU rule near the heat target; non-game floor (`-base 1152`); streams rested on low clocks; three faults fixed |
 | 11-16 | Panel rates above 60 Hz; native games; Chrome; GPU-bound rule; long runs at 165 Hz; fan tests; the repository split out of the test bench |
-| 11-17 | The thrifty GPU rule from the start (`-thrifty`); IFAS's GPU policy held off |
+| 11-17 | The thrifty GPU rule from the start (`-thrifty`); IFAS's GPU policy held off. Release 0.3, the governor alone |
+| 11-18 | **The panel's timing corrected**: the controller's timing words take effect when followed by two more writes and a mode change. All five modes matched; a service and an app to reapply them after every wake ([display.md](display.md#how-it-was-found)). A restart on waking that evening |
+| 11-19 | GBA and NES choices; the mode change made through SurfaceFlinger instead of the saved setting. Tablet updated to RedMagicOS 11.0.8MR1 keeping root; every rate measured again. A second restart on waking; a matched comparison could not reproduce it. The governor measured again on the new build. **One module, one app** (0.4): the governor's switch remembered, calibration off until switched on |
 
 ## Why the first governor was replaced
 
@@ -76,11 +78,37 @@ Other changes in the same rewrite:
   three minutes only by running slower, for 1-2.5 W less and 2-3% fewer
   frames; the race is too hot even at 967 MHz. See
   [results](results.md#heat-and-the-fan).
-- **Rejected without a trial**: writing the panel controller's flash, and any
-  further panel register traffic.
+- **Rejected without a trial**: writing the panel controller's flash.
+- **Withdrawn**: the rule, written here on 11-17, that no further panel
+  register traffic should be tried. The correction of 11-18 came from trying
+  the timing words once more with the writes that follow them in the
+  controller's own firmware. The caution behind the rule stands
+  ([hazards](display.md#hazards)).
+- **A storage clock-gating change against the restarts on waking** (11-19):
+  the storage controller's software clock gating switched off for one boot,
+  after the second panic showed that controller timing out first. It ran
+  without fault, proved nothing about the panic, and is not in the module.
 
 ## Open problems
 
+- **Restarts on waking with calibration in use**, twice; cause not found,
+  not reproduced in 48 matched wakes. The reason calibration is off until
+  switched on. Everything known, and what would settle it, is in
+  [display.md](display.md#the-open-problem-restarts-on-waking).
+- **Late frames the governor does not see in 30 fps games.** In Xenoblade
+  the "try" steps sometimes take the GPU minimum down to 222 MHz and leave it
+  there: the frame rate still counts as 30.1 of 30.1 while most of a frame a
+  second comes one refresh late, 61-70% clean against 94-100% a minute
+  earlier. Seen twice in seven governed runs on 11.0.8MR1, and consistent with
+  the 76-92% of 11.0.7's 150-second runs. A step down in 30 fps content
+  needs judging on late frames, not on the rate
+  ([results](results.md#xenoblade-and-shadow-of-the-colossus-in-rise)).
+- **Shadow of the Colossus is better in Balance than in Rise or Diablo**
+  (94-97% clean against 67-88% and 65%), the opposite of the advice for heavy
+  PS2 games. Why higher clocks cost it frames is not known.
+- **No readout over a game.** The app shows what the governor is doing only
+  while the app is in front, or beside a game in split screen. The first
+  governor's app had an overlay; it was not carried over.
 - **Content late at ample clocks with modest work** (Soulcalibur's attract
   loop in some launches): the minimums stay at the top for 1.5-3.6 W more than
   the vendor, though far more frames are on time. A mode of its own is

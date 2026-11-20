@@ -6,6 +6,10 @@ campaigns it comes from; their per-run summaries are in
 prints them. How the numbers are made is in
 [development.md](development.md#how-a-run-is-measured).
 
+**Which firmware.** Every section but the last was measured on RedMagicOS
+11.0.7; [RedMagicOS 11.0.8MR1](#redmagicos-1108mr1) repeats the main
+comparisons on that build and finds them unchanged.
+
 **Reading the numbers.** *Clean* is the share of seconds with no late frame
 beyond what the panel itself forces. *Late frames* are extra one-refresh delays
 per second. *W* is the whole tablet's draw. Power on the USB cable counts the
@@ -225,6 +229,116 @@ God of War II for 28 minutes (`heat1`-`heat6`), a synthetic GPU-heavy load for
 
 46.3 W against 50.4 W summed over eight games; no game's frames worse beyond
 its usual spread. Installed 2026-11-17.
+
+## RedMagicOS 11.0.8MR1
+
+Everything above was measured on RedMagicOS 11.0.7. The tablet was updated to
+11.0.8MR1 on 2026-11-19 (same kernel and display driver, a new GPU driver),
+and the governor measured again the same evening: campaigns `mr1-real1`
+(the plan of `real2`: every scene a minute under each arm, 82 runs),
+`mr1-real2`, `mr1-panel1` and `mr1-ntsc1`. The governor is the installed
+0.4 build, which is 0.3's control law; display calibration was off except
+where it says otherwise.
+
+**The 0.3 results hold on 11.0.8MR1.** Scene for scene the two builds are
+within the spread between two runs, with one pattern to know about in 30 fps
+games, below.
+
+| | 11.0.7 (`real2`) | 11.0.8MR1 (`mr1-real1`) |
+| --- | --- | --- |
+| Emulator scenes below 90% clean, vendor in Balance | 7 of 16 | 6 of 16 |
+| Emulator scenes at 88% clean or better, governor in Balance | 15 of 16 | 15 of 16 |
+| Mario Galaxy, heavy scene: vendor, governor, Diablo | 71% speed 3.7 W, 100% 4.5 W, 100% 7.5 W | 73% speed 3.7 W, 100% 4.3 W, 100% 7.2 W |
+| 60 fps video outside games: vendor, governor | 58.8 fps, 59.8 fps | 58.7 fps, 59.8 fps |
+| SuperTuxKart at 165 Hz, Rise: vendor, governor | 74% clean 1.35 late/s, 99.9% clean (30 min, `native3`) | 75% clean 1.79 late/s, 100% clean (5 min) |
+
+Power summed over the sixteen emulator scenes: 59.5 W under the vendor in
+Balance, 67.8 W with the governor in Balance, 73.1 W with it in Rise, 114.8 W
+in Diablo.
+
+| Scene | Vendor, Balance | Governor, Balance | Governor, Rise | Diablo |
+| --- | --- | --- | --- | --- |
+| Mario Galaxy, castle gate (Wii) | 0%, 3.7 W, 73% speed | 100%, 4.3 W | 100%, 4.4 W | 100%, 7.2 W |
+| Mario Galaxy, festival (Wii) | 59%, 4.3 W, 98% speed | 100%, 4.7 W | 100%, 4.7 W | 100%, 9.3 W |
+| Xenoblade (Wii) | 70%, 4.0 W | 100%, 4.7 W | 61%, 4.8 W | 79%, 9.3 W |
+| F-Zero GX attract (GameCube) | 76%, 3.8 W, 94% speed | 86%, 4.6 W, 95% speed | 92%, 5.9 W | 92%, 7.6 W, 95% speed |
+| Wind Waker (GameCube) | 92%, 3.2 W | 100%, 4.0 W | 100%, 3.6 W | 94%, 6.7 W |
+| Harry Potter, 25 fps PAL (GameCube) | 85%, 3.6 W | 98%, 4.0 W | 97%, 3.7 W | 98%, 7.4 W |
+| God of War II (PS2) | 94%, 5.7 W | 95%, 7.0 W | 100%, 8.2 W | 100%, 12.3 W |
+| Shadow of the Colossus (PS2) | 96%, 6.3 W | 96%, 7.6 W | 67%, 10.0 W | 65%, 12.2 W |
+| Soulcalibur attract (Dreamcast) | 80%, 2.9 W, 96% speed | 89%, 3.7 W, 96% speed | 94%, 4.3 W, 97% speed | 88%, 4.9 W, 96% speed |
+| Super Mario Odyssey (Switch) | 100%, 4.1 W | 100%, 4.5 W | 100%, 4.5 W | 100%, 7.7 W |
+| A Link Between Worlds (3DS) | 100%, 3.3 W | 100%, 3.3 W | 100%, 3.3 W | 100%, 6.0 W |
+| Pokemon X (3DS) | 100%, 3.1 W | 100%, 3.2 W | 100%, 3.2 W | 100%, 5.2 W |
+| God of War: Chains of Olympus (PSP) | 100%, 3.0 W | 100%, 3.0 W | 100%, 3.2 W | 100%, 5.0 W |
+| Mario Kart DS (DS) | 100%, 3.1 W | 100%, 3.7 W | 100%, 3.5 W | 100%, 5.6 W |
+| Super Mario World, Metroid Fusion (RetroArch) | 100%, 2.7-2.8 W | 100%, 2.7-2.8 W | 100%, 2.7-3.0 W | 100%, 3.9-4.3 W |
+| Shattered Pixel Dungeon (native) | 100%, 2.6 W | 100%, 2.6 W | 100%, 2.7 W | 100%, 4.0 W |
+
+SuperTuxKart's row is left out: its Game Space entry is now 165 Hz, so in
+this campaign it ran at 165 Hz (every arm 100% clean, 8.9-10.2 W, Diablo
+17.5 W) and is not the 60 Hz race of `real2`.
+
+Video in VLC, outside games (the governor's part there is the non-game
+floor): 60 fps at 1080p 58.7 fps and 66% clean under the vendor, 59.8 fps and
+82% with the governor; at 2160p 58.7 fps and 69% against 59.9 fps and 90%;
+30 fps 79% against 97%; 24 fps the same either way. Within 0.3 W in each.
+
+### Xenoblade and Shadow of the Colossus in Rise
+
+The two low Rise figures above were looked at again (`mr1-real2`: Rise,
+Balance, Balance, Rise on one running scene, a minute each).
+
+| Scene | Rise, first | Balance | Balance | Rise, last |
+| --- | --- | --- | --- | --- |
+| Xenoblade | 96%, 7.7 W | 94%, 5.8 W | 100%, 5.0 W | 70%, 7.5 W |
+| Shadow of the Colossus | 67%, 10.9 W | 97%, 7.4 W | 94%, 7.1 W | 88%, 10.0 W |
+
+- **Xenoblade is about time in the scene, not the mode.** Both low runs were
+  the last on a scene that had been running three minutes or more, and in
+  both the governor had by then tried the GPU minimum all the way down to
+  222 MHz (`try-gpu389`, `try-gpu342`, `try-gpu222` in its log) and kept it
+  there: its own count stayed at "30.1 fps of 30.1" while 0.6-0.9 frames a
+  second came a refresh late. This is 0.3's control law, not the new
+  firmware: on 11.0.7 the same builds gave Xenoblade 76-92% clean in runs of
+  150 s (`thrifty1`, `turns1`). It is the 30 fps case of a late frame the
+  governor does not see ([history](history.md#open-problems)).
+- **It does not always happen.** Seven minutes of Xenoblade in Balance from a
+  fresh launch (`mr1-xeno-long`) held 96% clean, minute by minute 100, 85,
+  100, 98, 95, 100 and 93%, with the GPU minimum settled near 443 MHz and
+  5.0 W, against the vendor's 70% and 4.0 W.
+- **Shadow of the Colossus is worse at high clocks**, as in `real2`, where
+  Diablo gave 66%: here Diablo 65%, Rise 67-88% with 5-13 hitches a minute,
+  Balance 94-97% with none. On 11.0.7 the governed Rise runs ranged 78-97%.
+  For this game Balance is the better mode, at 3 W less.
+
+### 165 Hz and the vendor's refresh setting
+
+`mr1-panel1`: SuperTuxKart at 165 Hz in Rise for five minutes. Vendor
+164.3 fps, 74.8% clean, 1.79 late frames a second, 7.9 W; governor
+166.05 fps, every second clean, 8.1 W.
+
+The first governed run is void: 95 seconds in, the panel went from 165 Hz to
+60 Hz under the running game, with display calibration off. The bench marks
+such runs ("panel at the end: NOT on rate"); the repeat held 165 Hz
+throughout. This is the system's refresh setting acting by itself, seen on
+11.0.7 as well ([history](history.md#open-problems)).
+
+### An emulator on the NTSC choice
+
+`mr1-ntsc1`: Super Mario Galaxy's heavy scene for two minutes with display
+calibration on NTSC, the panel at 59.940 Hz by Android's present times.
+
+| | Speed | Frames shown for one refresh | For two |
+| --- | --- | --- | --- |
+| Vendor, Balance | 73% | 3,428 | 2,023 |
+| Governor, Balance | 100% | 7,470 | 2 |
+| Governor, Balance, factory timing (`mr1-real1`, 67 s) | 100% | 4,012 | 22 |
+
+With the governor keeping the game on time and the panel at the game's own
+rate, two frames in two minutes were shown twice. On the factory panel the
+same governed scene shows one twice every three seconds, which no clock
+setting can remove.
 
 ## Not measured
 

@@ -1,7 +1,7 @@
 # Measured runs
 
 `campaigns/<name>.jsonl` holds one line per recording: the summary the test
-bench wrote after each run (766 runs, 2026-11-13 to 11-18). The raw
+bench wrote after each run (2026-11-13 to 11-19). The raw
 recordings (every frame's present time, clocks ten times a second) are about
 670 MB and stay with the test bench in `~/workspace/astra-root/lab/runs/`.
 
@@ -63,4 +63,9 @@ python3 tools/results.py runs native3
 | `thrifty1`-`thrifty3` | the thrifty GPU rule from the start; Soulcalibur against the vendor |
 | `gpucap0`, `gpufirst1`-`gpufirst3` | the GPU's top level given up first by the heat control (branch `gpu-first-heat`); most runs spoilt by the vendor's drop to 120 Hz or an update notice, see `docs/results.md` |
 | `release1` | the 0.3 release zip installed fresh through Magisk, after a reboot: Super Mario Galaxy against stock |
+| `mr1-real1` | RedMagicOS 11.0.8MR1: every scripted scene under the vendor, the installed governor in Balance and Rise, and Diablo; the same plan as `real2` |
+| `mr1-real2` | 11.0.8MR1: Xenoblade and Shadow of the Colossus again, Rise first and last with Balance between |
+| `mr1-panel1` | 11.0.8MR1: SuperTuxKart at 165 Hz in Rise, governor and vendor (the first `rise` run is void: the panel went to 60 Hz) |
+| `mr1-xeno-long` | 11.0.8MR1: seven minutes of Xenoblade under the governor in Balance |
+| `mr1-ntsc1` | 11.0.8MR1, the 0.4 zip: Super Mario Galaxy with display calibration on NTSC, vendor and governor |
 | `_loadgen_csv` | per-frame logs written by the synthetic load app itself |
