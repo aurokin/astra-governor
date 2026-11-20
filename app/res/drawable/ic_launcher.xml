@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Evenly spaced refreshes with one frame arriving on each: what the module is for. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp" android:viewportWidth="48" android:viewportHeight="48">
+    <path android:fillColor="#0F1B21" android:pathData="M0,0h48v48h-48z" />
+    <path android:strokeColor="#F4B63F" android:strokeWidth="3.2" android:strokeLineCap="round"
+        android:pathData="M12,15v18 M20,15v18 M28,15v18 M36,15v18" />
+    <path android:strokeColor="#74C7B8" android:strokeWidth="2.4" android:strokeLineCap="round"
+        android:pathData="M8,38h32" />
+</vector>

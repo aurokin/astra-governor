@@ -1,2 +1,3 @@
 build/
 /astrad2
+*.keystore
