@@ -1,3 +1,4 @@
 build/
 /astrad2
 *.keystore
+__pycache__/

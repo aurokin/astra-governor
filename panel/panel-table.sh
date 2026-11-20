@@ -34,25 +34,50 @@ panel_on() {
         [ "$(cat /proc/driver/lcd_state)" = 0 ]
 }
 awake() { dumpsys power | grep 'mWakefulness=Awake' >/dev/null && panel_on; }
-# This diagnostic interface supports a four-byte read on this build.
-reg=/sys/reg_debug
+# The controller is reached through the display driver's own command files in
+# debugfs. A command sent that way waits for the lock the driver holds while
+# it powers the panel up or down, and is refused once the display link is off.
+# The vendor's /sys/reg_debug nodes take no lock: a packet that met the panel's
+# off command left the link's interrupt raised, and the tablet hung at the
+# next wake (2026-11-19, docs/display.md).
+# --- link to the controller ---
+debug=/dev/astra-panel-debug
+dsi=$debug/dri/0/DSI-1
+if [ ! -e "$dsi/tx_cmd" ]; then
+    mkdir -p "$debug" && chmod 700 "$debug" && mount -t debugfs debugfs "$debug" 2>/dev/null || :
+    [ -e "$dsi/tx_cmd" ] && [ -e "$dsi/rx_cmd" ] || blocked 'The display driver has no command interface here.'
+fi
+# A packet header for the driver: type, unused, channel 0, low-power mode, no
+# wait, then the payload's length in two bytes.
+write_packet() {
+    left=$1 bytes=
+    while [ -n "$left" ]; do
+        rest=${left#??}
+        bytes="$bytes 0x${left%"$rest"}"
+        left=$rest
+    done
+    panel_on || return 1
+    # Generic long write. The file takes the request whatever becomes of it;
+    # reading it back says whether the driver sent it.
+    echo "0x29 0x00 0x00 0x02 0x00 0x00 $(printf '0x%02x' $((${#1} / 2)))$bytes" > "$dsi/tx_cmd" || return 1
+    [ "$(cat "$dsi/tx_cmd")" = 'last_cmd_tx_sts:0x1' ]
+}
+# Select the address, then a generic read of four bytes. Never more than four:
+# longer reads overrun a buffer in the controller's firmware protocol.
 read_word() {
+    write_packet "90$1" || return 1
     panel_on || return 1
-    echo "90$1" > "$reg/gendwritelp" || return 1
-    panel_on || return 1
-    echo 9104 > "$reg/gendreadlp" || return 1
-    { IFS= read -r header && read -r a b c d extra; } < "$reg/gendreadlp" || return 1
-    [ "$header" = 'read back:' ] && [ -z "$extra" ] || return 1
-    case "$a $b $c $d" in
-        'rbuf[00]='??' rbuf[01]='??' rbuf[02]='??' rbuf[03]='??) ;;
+    echo '0x04 0x14 0x00 0x00 0x02 0x00 0x00 0x01 0x91' > "$dsi/rx_cmd" 2>/dev/null || return 1
+    reply=$(cat "$dsi/rx_cmd" 2>/dev/null) || return 1
+    set -- $reply
+    [ "$#" -eq 4 ] || return 1
+    case "$1 $2 $3 $4" in
+        '0x'??' 0x'??' 0x'??' 0x'??) ;;
         *) return 1 ;;
     esac
-    value="${d#*=}${c#*=}${b#*=}${a#*=}"
+    value="${4#0x}${3#0x}${2#0x}${1#0x}"
     case "$value" in *[!0-9a-f]*) return 1 ;; esac
     echo "$value"
-}
-write_packet() {
-    panel_on && printf '%s\n' "$1" > "$reg/gendwritelp"
 }
 
 # H then V for each native mode, in wire order. Content profiles share the four higher modes.
@@ -107,7 +132,9 @@ get_record() {
 set_record() {
     awk -v key="$1" '$1 != key' "$journal" > "$journal.new" || return 1
     if [ "$#" -gt 1 ]; then printf '%s\n' "$*" >> "$journal.new" || return 1; fi
-    mv -f "$journal.new" "$journal"
+    # On disk before it takes the old one's name: a restart in between must
+    # find one receipt or the other, not an empty file under the name.
+    sync "$journal.new" && mv -f "$journal.new" "$journal"
 }
 valid_receipt() {
     [ -f "$journal" ] || return 0
@@ -243,7 +270,15 @@ recover() {
     exit "$rc"
 }
 awake || blocked 'Panel is asleep.'
-valid_receipt || blocked 'Invalid calibration receipt.'
+# The controller forgets everything when it loses power. A receipt that cannot
+# be read and was last written before this boot describes nothing any more.
+boot=$(cat /proc/sys/kernel/random/boot_id) || blocked 'Cannot read the boot identity.'
+if ! valid_receipt; then
+    [ "$(cat "$dir/boot" 2>/dev/null)" != "$boot" ] || blocked 'Invalid calibration receipt.'
+    rm -f "$journal" "$journal.new" || blocked 'Invalid calibration receipt.'
+    echo 'Discarded an unreadable receipt from before the last restart.' >&2
+    if [ "$profile" = stock ]; then exit 0; fi
+fi
 preference_changed=0
 if [ -f "$dir/mode-policy" ]; then
     case "$command" in check*) exit 1 ;; esac
@@ -261,8 +296,13 @@ if [ "$profile" != stock ]; then
     scan || blocked 'Panel checks failed.'
     if [ "$needed" = 0 ]; then exit 0; fi
 fi
+if [ "$(cat "$dir/boot" 2>/dev/null)" != "$boot" ]; then
+    printf '%s\n' "$boot" > "$dir/boot.new" && sync "$dir/boot.new" && mv -f "$dir/boot.new" "$dir/boot" ||
+        blocked 'Cannot save calibration receipt.'
+fi
 if [ ! -f "$journal" ]; then
-    printf 'format 1\n' > "$journal.new" && mv "$journal.new" "$journal" || blocked 'Cannot save calibration receipt.'
+    printf 'format 1\n' > "$journal.new" && sync "$journal.new" && mv "$journal.new" "$journal" ||
+        blocked 'Cannot save calibration receipt.'
 fi
 trap recover EXIT
 trap 'exit 1' INT HUP TERM

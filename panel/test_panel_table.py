@@ -71,6 +71,7 @@ class PanelTableTests(unittest.TestCase):
         self.cmd("id", "echo 0")
         self.cmd("getprop", 'case "$1" in ro.product.model) echo NP05J ;; *) echo REDMAGICOS11.0.7_NP05J_GB ;; esac')
         self.cmd("am", "echo 0")
+        self.cmd("sync", "exit 0")
         self.cmd("flock", """exec python3 -c 'import fcntl; fcntl.flock(0,fcntl.LOCK_EX|fcntl.LOCK_NB)'""")
         self.cmd("settings", '''
             case "$3" in get) cat "$MOCK/pref"; exit ;; delete) choice=null ;; put) choice=$6 ;; *) exit 1 ;; esac
@@ -100,14 +101,15 @@ class PanelTableTests(unittest.TestCase):
                 echo "mActiveSfDisplayMode=DisplayMode{vsyncRate=$hz.0,}" ;;
             esac
         ''')
-        for path, value in {**FACTORY, "chip": "0008874b", "pref": "0", "active": "3", "dpms": "On", "lcd": "0", "packets": "", "selections": "", "pulses": ""}.items():
+        for path, value in {**FACTORY, "chip": "0008874b", "pref": "0", "active": "3", "dpms": "On", "lcd": "0", "boot": "boot-1", "packets": "", "selections": "", "pulses": ""}.items():
             self.put(path, value)
         source = SOURCE.read_text()
-        start, end = source.index("reg=/sys/reg_debug"), source.index("# H then V")
+        start, end = source.index("# --- link to the controller ---"), source.index("# H then V")
         source = (source[:start] + HARDWARE + source[end:]).replace(
             "/data/adb/astra-panel-rate", str(self.root / "state")).replace(
             "/sys/class/drm/card0-DSI-1/dpms", str(self.root / "dpms")).replace(
-            "/proc/driver/lcd_state", str(self.root / "lcd"))
+            "/proc/driver/lcd_state", str(self.root / "lcd")).replace(
+            "/proc/sys/kernel/random/boot_id", str(self.root / "boot"))
         self.put("run.sh", source)
         self.receipt = self.root / "state" / "table-session"
 
@@ -129,6 +131,20 @@ class PanelTableTests(unittest.TestCase):
 
     def table(self):
         return {bank: self.get(bank) for bank in FACTORY}
+
+    def test_unreadable_receipt_is_dropped_only_after_a_restart(self):
+        self.invoke("apply60")
+        # What a restart in the middle of a receipt update used to leave behind.
+        self.receipt.write_bytes(b"\0" * 362)
+        self.invoke("check60", 2)
+        self.assertEqual(self.table(), CALIBRATED)
+        # After a restart the controller is back at factory timing by itself.
+        self.put("boot", "boot-2")
+        for bank, value in FACTORY.items():
+            self.put(bank, value)
+        self.invoke("apply60")
+        self.assertEqual(self.table(), CALIBRATED)
+        self.invoke("check60")
 
     def test_auto_profiles_and_idempotence(self):
         self.invoke("check60", 1)

@@ -19,9 +19,12 @@ corrects it, what was measured, and what is not yet settled.
   the panel's own timing signal, on both supported firmware builds. The 60 Hz
   mode can instead be matched to 59.94, 59.73 or 60.10 Hz for consoles that
   ran at those rates.
-- **The open problem.** Two system restarts on waking, on days calibration
-  was in use, are unexplained. Calibration ships switched off and marked
-  experimental until they are.
+- **Restarts on waking, found and fixed.** Twice the development tablet
+  restarted while waking with calibration in use. The cause was a calibration
+  packet reaching the display link as the panel powered down; calibration now
+  sends its packets through a path the driver locks against that. It stays
+  off until switched on, and marked experimental: all of this is days of
+  work on one tablet.
 
 ## The panel's real refresh rates
 
@@ -114,7 +117,7 @@ every screen-off. Calibration is therefore reapplied after every wake.
 | Part | What it does |
 | --- | --- |
 | `panel-service` (Go, root) | decides when: waits for boot and for a display that has been steadily on, runs the helper once per wake, and reports its state on `127.0.0.1:7879/calibration` (read-only) |
-| `panel-table.sh` (root) | the only thing that talks to the controller: checks, writes and verifies the ten words through the vendor kernel's `/sys/reg_debug` nodes, keeping a journal of what it owns |
+| `panel-table.sh` (root) | the only thing that talks to the controller: checks, writes and verifies the ten words through the display driver's command files (`tx_cmd` and `rx_cmd` of connector `DSI-1` in debugfs, which it mounts at `/dev/astra-panel-debug`), keeping a journal of what it owns |
 | `panel-mode.jar` (`PanelMode.java`, run with `app_process`) | the momentary mode change through SurfaceFlinger, with a receipt so an interrupted one is undone |
 | The Astra app | saves the owner's choice in a file in its device-protected storage; the service reads it. The app has no access to the panel |
 
@@ -136,8 +139,14 @@ The first days of work on this controller cost several kernel panics, all
 from register traffic at the wrong moment ([hazards](#hazards)). The service
 is built around not repeating them:
 
-- **Only on a fully-on panel.** The helper checks the display's power state
-  before every single transfer and stops at the first one that is not "on".
+- **Under the driver's own lock.** Every packet goes through the display
+  driver's command files, which hold the lock the driver takes to power the
+  panel up or down for the length of the transfer, and refuse a packet once
+  the display link is off. A packet and a power-down cannot overlap
+  ([what happened when they could](#restarts-on-waking-found-and-fixed)).
+- **Only on a fully-on panel.** The helper also checks the display's power
+  state before every single transfer and stops at the first one that is not
+  "on".
 - **Only on a known tablet and firmware**: model NP05J, builds
   `REDMAGICOS11.0.7_NP05J_GB` and `REDMAGICOS11.0.8MR1_NP05J_GB`. The timing
   words were measured on those; on anything else it leaves the panel alone
@@ -146,7 +155,10 @@ is built around not repeating them:
   only words it recognises: a value in the controller that is neither factory
   nor one of its own stops it.
 - **A journal** records each word before it is written, so an interrupted run
-  is finished or undone at the next wake rather than guessed at.
+  is finished or undone at the next wake rather than guessed at. Each update
+  is on disk before it replaces the last, and a journal that cannot be read
+  is dropped only if the tablet has restarted since it was written, when the
+  controller is at factory timing whatever it said.
 - **A guard file** is put down, synced, before the first transfer and removed
   after the last. If the tablet dies in between, the service finds the guard
   at the next start and does nothing until the screen has been fully off and
@@ -174,6 +186,11 @@ Measured, on both firmware builds unless noted:
   Game Space, system setting on Auto): 165 Hz held, 164.998 Hz at the pin.
 - **An interrupted run**: with the guard file left in place, the service
   stayed paused through a boot and resumed after one sleep and wake.
+- **170 runs cut short on purpose** by switching the screen off at a random
+  moment inside them (11.0.8MR1, 2026-11-19): no restart and no display-link
+  error. Fifteen had a packet requested within 2 ms of the panel's off
+  command; twenty packets arrived after the link was off and were refused by
+  the driver. A wake left alone afterwards ended **Calibrated** at 60.000 Hz.
 - **A 59.94 fps emulator on NTSC** (11.0.8MR1, campaign `mr1-ntsc1`): Super
   Mario Galaxy's heavy scene under the governor for two minutes showed 7,470
   frames for one refresh each and 2 for two. On factory timing the same scene
@@ -191,71 +208,94 @@ Not measured:
 - **The GBA and NES choices with an emulator**, and the NTSC one with any
   game but the one above.
 - **Battery cost**, which should be nil: nothing runs once the words are in.
-- **Weeks of use.** Everything above is from three days.
+- **Weeks of use.** Everything above is from four days, on one tablet.
+- **The rates at the pin with the changed transfer path.** The ten words are
+  the ones measured there; what was checked after the change is that they
+  read back and that Android's own measure of the refresh period goes to
+  60.000 Hz and back to 60.272.
 
-## The open problem: restarts on waking
+## Restarts on waking: found and fixed
 
 Twice the tablet restarted by itself while waking: once on 11.0.7 (2026-11-18)
 and once on 11.0.8MR1 (2026-11-19). Both times it came back up by itself.
 After the second, a game's settings file and one setting written seconds
-before had to be put back; nothing else was lost.
+before had to be put back; nothing else was lost. Until 0.4 calibration was
+the suspect and nothing more: a matched test of 24 wakes with it and 24
+without, and 16 more without, reproduced neither.
 
-What is known:
+**The cause.** Until 0.4 the helper wrote through the vendor kernel's
+`/sys/reg_debug` nodes. In the display driver (`msm_drm.ko`, the same file on
+both builds) a write through them checks one "panel is initialised" flag and
+sends the packet without taking any lock; the driver switching the panel off
+takes its lock and does not wait for such a packet. The helper checked the
+display's state before each packet, which leaves the same gap. A helper run
+took 2-6 s after each wake, so a screen that went off again within seconds of
+coming on could catch a packet in flight.
 
-| | 11.0.7 | 11.0.8MR1 |
+**Reproducing it.** With the screen switched off on purpose at a random moment
+inside each helper run, the 18th such run put a packet into the driver 0.6 ms
+before the panel's off command. Nothing was logged then. At the next wake, 30 s
+later, the display's interrupt fired four million times in 15 s; one core did
+nothing else; storage, the touchscreen and the charger timed out one after
+another, and the watchdog restarted the tablet:
+
+| Since screen-on | Kernel log |
+| --- | --- |
+| 0.57 s | an I2C transfer fails |
+| 0.70 s | storage: power-mode command timed out, Hibern8 entry failed |
+| 1.3-4.0 s | `dsi-ctrl-0: dma_tx done but irq not triggered`, three times |
+| 3.7 s on | touchscreen and charger transfers time out |
+| 14.96 s | `IRQ 403 [GICv3:msm_drm] - 4017678 times`, watchdog restart |
+
+The restart of 11-19 has the same opening (storage timeout 0.62 s after
+screen-on, then touch and charger) and the one of 11-18 the same ending;
+both ended in `rpmh-rsc.c:1106`, a power request that timed out, before the
+watchdog got there. Both boots had a helper run cut short by the screen
+going off earlier.
+
+**The fix.** The helper now sends every packet through the display driver's
+own command files, `tx_cmd` and `rx_cmd` of the connector in debugfs. They
+call `dsi_display_cmd_transfer` and `dsi_display_cmd_receive`, which hold the
+display's lock for the whole transfer, the same lock `dsi_display_disable`
+and `dsi_display_unprepare` take at entry, and refuse when the DSI host is no
+longer initialised. Read from the driver's code and checked on the tablet:
+with the screen off a write is refused and a read returns an error, with
+nothing else in the kernel log.
+
+**The same test against the fix.** 170 helper runs cut short the same way:
+eight with a packet requested within a millisecond of the off command (the
+closest 0.38 ms before it), fifteen within two; no restart, no display-link
+error. In the first test one of the two packets that close was followed by
+the hang.
+
+| | Vendor's nodes (before 0.4) | Driver's command files (0.4) |
 | --- | --- | --- |
-| The fault | a kernel panic consistent with `rpmh-rsc.c:1106`, Qualcomm's power-resource driver, 11 s after the touchscreen resumed | `rpmh-rsc.c:1106`, 10 s after the storage controller timed out entering its low-power state on wake |
-| Calibration that boot | applied (Modern) | applied (Modern) |
-| Last helper run before it | 32 minutes earlier, and it had been interrupted by the screen going off | 3 minutes earlier, completed; the run before that had been interrupted |
-| The governor | running | stopped 77 s earlier |
+| Helper runs cut short | 18 | 170 |
+| A packet within 1 ms of the off command | 2 | 8 |
+| Packets refused because the link was off | none | 20 |
+| Restarts | 1 | 0 |
 
-- **The panic is not in the helper's own traffic.** In both cases the helper
-  had finished, or been stopped, minutes before; the guard file agrees.
-- **The same panic was seen on 11-09 and 11-10** when registers were written
-  with the display off or powering down ([hazards](#hazards)). That is the
-  reason to suspect calibration at all.
-- **Both boots had a helper run cut short by the screen going off** before
-  the panic. Three more interrupted runs, in the comparison below, were
-  followed by no panic.
-- **The vendor's write path does not exclude a power-down.** In the display
-  driver (`msm_drm.ko`, the same file on both builds) a write through
-  `/sys/reg_debug/gendwritelp` checks one "panel is initialised" flag and
-  sends the packet without taking the panel's lock; reads, and the driver
-  switching the panel off, take it. The helper's own check of the display
-  state before each packet has the same gap. So a packet can be in transfer
-  while the screen powers down, which is the condition that panicked the
-  kernel on 11-09. Every read the helper makes starts with such a write.
-- **It could not be reproduced on demand.** Six pairs of matched blocks on
-  11.0.8MR1 (video, a race, battery standby), 24 app wakes on factory timing
-  with both parts off and 24 with calibration on Modern, gave no restart
-  either way, and no storage error in 2,290 traced storage events. Sixteen
-  more wakes on factory timing gave none.
-- **The governor ran alone for four days and several hundred recorded runs**
-  before calibration existed, with no restart of this kind recorded.
-- **An owner of another Astra has reported spontaneous restarts** on stock
-  firmware; whether they are this fault is unknown.
+A second fault showed up with the restart: the journal was replaced by
+renaming a file that had not reached the disk, the restart left it as 362
+zero bytes, and the service then refused to run until it was deleted by
+hand. Fixed as described under [what keeps it safe](#what-keeps-it-safe).
 
-What that adds up to: calibration is the likeliest trigger and is not proven
-to be one; if it is, the path runs through something left behind after the
-helper has finished or been interrupted, not through a transfer in progress;
-and it is rare, roughly one in a few dozen wakes at worst. So calibration is
-off until switched on, the app says why, and a tablet that restarts by itself
-with calibration on should have it switched off.
-
-What would settle it: provoking interrupted helper runs on purpose (screen
-off two to four seconds after each wake) to see whether the panic follows
-them. If it does, the helper's packets, now spread over two to six seconds
-of each wake, would have to go out in one burst of a tenth of a second,
-started only while Android is fully awake, so that a screen-off beginning
-after the burst has started cannot reach the panel before it ends.
+What this does not show: that these two restarts are the only way the
+tablet can restart on waking (an owner of another Astra has reported
+spontaneous restarts on stock firmware), or how calibration holds up over
+weeks. If a tablet restarts by itself with calibration on, switch it off and
+see whether it stops.
 
 ## Hazards
 
-Register traffic through `/sys/reg_debug` caused kernel panics during the
-investigation when the display was off or powering down (`BUG at
-drivers/soc/qcom/rpmh-rsc.c`), when a read asked for more than 4 bytes (`BUG
-at lib/string_helpers.c`), and when unpopulated blocks or the controller's RAM
-were read; some reads broke the display link until a reboot. Android partition
+Register traffic through the vendor's `/sys/reg_debug` nodes caused kernel
+panics during the investigation when the display was off or powering down
+(`BUG at drivers/soc/qcom/rpmh-rsc.c`, and the hang above), when a read asked
+for more than 4 bytes (`BUG at lib/string_helpers.c`), and when unpopulated
+blocks or the controller's RAM were read; some reads broke the display link
+until a reboot. Nothing in this repository uses those nodes any more. The
+driver's command files rule out the first of these; the others are about
+what is asked of the controller and apply to any path. Android partition
 recovery does not recover the panel controller's flash, which calibration
 never writes. Any change to `panel-table.sh` should be read against the
 [register rules](#where-the-rest-is) first.

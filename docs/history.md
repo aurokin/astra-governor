@@ -50,6 +50,8 @@ Other changes in the same rewrite:
 | 11-15 | the non-game floor took back a minimum it had not set | only take back its own |
 | 11-16 | a game the GPU limits kept the CPU at the top (19.1 W against 16.4) | the GPU-bound rule |
 | 11-16 | GPU clock held on suspicion in games that drop frames by themselves (Soulcalibur at 1060 MHz, 4% busy) | the thrifty rule from the start |
+| 11-19 | the tablet restarted while waking, twice in two days, with calibration in use: a calibration packet sent through the vendor's unlocked debug nodes met the panel's off command, and the display's interrupt fired without end at the next wake | calibration sends its packets through the display driver's own command files, which the driver locks against a power-down ([display.md](display.md#restarts-on-waking-found-and-fixed)) |
+| 11-19 | that restart left calibration's journal as a file of zeros, and the service refused to run | the journal reaches the disk before it replaces the last; an unreadable one from before a restart is dropped |
 
 ## Tried and not adopted
 
@@ -91,10 +93,6 @@ Other changes in the same rewrite:
 
 ## Open problems
 
-- **Restarts on waking with calibration in use**, twice; cause not found,
-  not reproduced in 48 matched wakes. The reason calibration is off until
-  switched on. Everything known, and what would settle it, is in
-  [display.md](display.md#the-open-problem-restarts-on-waking).
 - **Late frames the governor does not see in 30 fps games.** In Xenoblade
   the "try" steps sometimes take the GPU minimum down to 222 MHz and leave it
   there: the frame rate still counts as 30.1 of 30.1 while most of a frame a

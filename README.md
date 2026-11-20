@@ -108,13 +108,14 @@ The 90, 120, 144 and 165 Hz modes are corrected with any of them.
   overlay.
 - **To go back**, switch it off with the screen on and wait for **Factory
   timing**. A reboot with it off also does it; nothing is stored in the panel.
-- **Why it is experimental.** On the tablet this was developed on, the system
-  restarted while waking twice in two days with calibration in use, and
-  recovered by itself both times. A matched test afterwards, 24 wakes with
-  calibration and 24 without, produced no restart either way, so the cause is
-  not found. If your tablet restarts by itself, switch calibration off;
-  [docs/display.md](docs/display.md#the-open-problem-restarts-on-waking) has
-  everything known.
+- **Why it is experimental.** It is four days old and has run on one tablet.
+  During development that tablet restarted while waking twice. The cause was
+  found (a calibration packet reaching the panel as it powered down) and
+  fixed in 0.4: 170 calibration runs cut short on purpose by switching the
+  screen off gave no restart, where the 18th had before. If your tablet
+  restarts by itself, switch calibration off and see whether it stops;
+  [docs/display.md](docs/display.md#restarts-on-waking-found-and-fixed) has
+  the whole story.
 
 ## What to expect
 
@@ -166,8 +167,10 @@ over the display link, the same link the tablet's own driver uses. They live
 in the controller's working memory: the panel forgets them whenever it powers
 down, and nothing is ever written to its flash. It only runs on the two
 firmware builds it was measured on, checks the controller's identity first,
-and stops until the next sleep and wake if anything reads back wrong. It is
-the newer and less proven half; see why it is experimental above.
+and stops until the next sleep and wake if anything reads back wrong. Its
+packets go through the display driver's own command path, which the driver
+locks against the panel powering down. It is the newer and less proven half;
+see why it is experimental above.
 
 Removing the module returns the tablet to stock behaviour after a reboot.
 
