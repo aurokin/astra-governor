@@ -176,6 +176,28 @@ says.
 | `VsyncMeter.java` | the panel's real rate from Android's vsync timestamps |
 | `Ui.java`, `PresetRow.java` | colours, type and the view shapes |
 
+## Checking calibration against a screen-off
+
+Any change to how `panel-table.sh` reaches the controller, or to when the
+service runs it, has to survive the screen going off in the middle of a run:
+that is what [restarted the tablet](display.md#restarts-on-waking-found-and-fixed)
+before 0.4, and it took the 18th cut-short run to show.
+
+```sh
+adb push panel/interrupt-test.sh /data/local/tmp/
+adb exec-out su -c "dmesg -w" > kernel.log &          # the only record if it restarts
+adb shell su -c "'nohup setsid sh /data/local/tmp/interrupt-test.sh 200 10 > /data/local/tmp/interrupt.log 2>&1 < /dev/null &'"
+```
+
+with calibration switched on in the app. It wakes the screen, waits for the
+helper to start, sends the sleep key at a random moment inside its run, and
+repeats. 200 cycles take about 70 minutes. Afterwards: the boot ID is the one
+it started on; the kernel log has no `transfer failed`, `msm-dsi-err`,
+`dma_tx done but irq not triggered` or storage timeout; a wake left alone
+ends **Calibrated**; switching off returns factory timing. Lines saying
+`Command xfer attempted while device is in suspend state` are the driver
+refusing a late packet, which is the point.
+
 ## Checking a firmware update
 
 A new RedMagicOS build needs both halves looked at again before the module
@@ -189,7 +211,9 @@ says it supports it.
   `panel/panel-table.sh`. Before adding a build to both: measure the five
   factory rates at the pin with the module off, read the ten factory words,
   prove one mode's change and its restoration, then measure every rate with
-  the service. The 11.0.8MR1 record is
+  the service. Check too that the display driver still has its command files
+  (`tx_cmd` and `rx_cmd` under `dri/0/DSI-1` in debugfs) and that they still
+  take the display's lock: the helper depends on both. The 11.0.8MR1 record is
   `~/workspace/astra-root/evidence/astra-migration-20261119/`, and the
   procedure for updating a rooted tablet without losing root is
   `~/workspace/astra-root/governor/OS-UPDATE.md`.
@@ -201,7 +225,8 @@ says it supports it.
 3. A `builds.sh` comparison against the installed build on the scenes the
    change could affect, and on the default set if it touches the control law.
    For a change to calibration: every rate at the pin, a boot, four wakes and
-   switching off, as in [display.md](display.md#measured-and-not-measured).
+   switching off, as in [display.md](display.md#measured-and-not-measured),
+   and the [screen-off test](#checking-calibration-against-a-screen-off).
 4. Bump `version` and `versionCode` in `module/module.prop` and
    `app/AndroidManifest.xml`, commit, then `sh module/install.sh`.
 5. Record what was measured in [results.md](results.md) and, if a rule

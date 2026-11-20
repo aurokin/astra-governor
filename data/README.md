@@ -1,7 +1,7 @@
 # Measured runs
 
 `campaigns/<name>.jsonl` holds one line per recording: the summary the test
-bench wrote after each run (2026-11-13 to 11-19). The raw
+bench wrote after each run (2026-11-13 to 11-20). The raw
 recordings (every frame's present time, clocks ten times a second) are about
 670 MB and stay with the test bench in `~/workspace/astra-root/lab/runs/`.
 
@@ -68,4 +68,8 @@ python3 tools/results.py runs native3
 | `mr1-panel1` | 11.0.8MR1: SuperTuxKart at 165 Hz in Rise, governor and vendor (the first `rise` run is void: the panel went to 60 Hz) |
 | `mr1-xeno-long` | 11.0.8MR1: seven minutes of Xenoblade under the governor in Balance |
 | `mr1-ntsc1` | 11.0.8MR1, the 0.4 zip: Super Mario Galaxy with display calibration on NTSC, vendor and governor |
+| `mr2-thirty1` | 11.0.8MR1, the governor counting frames held too long: Xenoblade, Shadow of the Colossus and Wind Waker, 90 s three times each in Balance and Rise |
+| `mr2-real1` | 11.0.8MR1, the 0.4 release installed from its zip: the plan of `real2` and `mr1-real1` again |
+| `mr2-ntsc1` | the 0.4 release: Super Mario Galaxy with display calibration on NTSC, vendor and governor |
+| `mr2-panel1` | the 0.4 release: SuperTuxKart at 165 Hz in Rise, vendor and governor (the first `stockrise` run is void: the panel left 165 Hz) |
 | `_loadgen_csv` | per-frame logs written by the synthetic load app itself |

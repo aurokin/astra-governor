@@ -126,7 +126,7 @@ every screen-off. Calibration is therefore reapplied after every wake.
 | Moment | What happens |
 | --- | --- |
 | Boot | waits for Android to finish booting, then 30 s, then for the display to have been on for 8 s; about 67 s from the reboot request to **Calibrated** in two measured boots |
-| Wake | 2 s after the display is steadily on, the helper runs for 2-6 s; one helper run per wake |
+| Wake | 2 s after the display is steadily on, the helper runs for 4-8 s (2-6 s before 0.4; the driver's command files are slower per packet); one helper run per wake |
 | In use | nothing: no reads, no writes. Mode changes use the words already in the controller |
 | Choice changed in the app | applied within about a second while the screen is on |
 | Switched off in the app | the factory words are written back and verified, then nothing more |
@@ -197,9 +197,16 @@ Measured, on both firmware builds unless noted:
   repeats a frame every three seconds whatever the clocks do: 22 in 67
   seconds in `mr1-real1`. Android's present times put the panel at 59.940 Hz
   during the run.
-- **Through the app, on the release zip**: on, Modern, NTSC, a sleep and
-  wake, and off again, with the app's own meter reading 60.27, 60.00, 59.94
-  and 60.27 Hz and no display-link error in the kernel log.
+- **Through the app, on the first 0.4 zip** (the vendor's nodes): on, Modern,
+  NTSC, a sleep and wake, and off again, with the app's own meter reading
+  60.27, 60.00, 59.94 and 60.27 Hz and no display-link error in the kernel
+  log.
+- **On the released 0.4 zip** (the driver's command files), installed
+  through Magisk and rebooted: the same sequence by the saved choice, with
+  Android's measure of the refresh period at 60.000, 59.940, 59.940 after
+  the wake, and 60.272 Hz; no display-link error. Then Super Mario Galaxy on
+  NTSC for two minutes (`mr2-ntsc1`): the panel at 59.940 Hz, 2 frames shown
+  twice.
 
 Not measured:
 
