@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.auro.astra"
-    android:versionCode="4" android:versionName="0.4">
+    android:versionCode="5" android:versionName="0.4.1">
     <uses-sdk android:minSdkVersion="34" android:targetSdkVersion="36" />
     <!-- Loopback only: the governor's and the calibration service's status on 127.0.0.1. -->
     <uses-permission android:name="android.permission.INTERNET" />

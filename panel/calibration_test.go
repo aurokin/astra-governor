@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -226,5 +227,69 @@ func TestRetroCommandSelection(t *testing.T) {
 		if !reflect.DeepEqual(cmds, []string{"apply" + r}) {
 			t.Fatal(cmds)
 		}
+	}
+}
+
+func TestRestartByItselfHoldsCalibrationOffUntilTheOwnerChooses(t *testing.T) {
+	h := restartHold{t.TempDir()}
+	on, off := preference{true, "59.94"}, preference{false, "59.94"}
+	judge := func(boot, reason string, p preference) {
+		t.Helper()
+		if err := h.judge(boot, reason, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	judge("a", "reboot,shell", on)
+	if msg := h.message(on); msg != "" {
+		t.Fatalf("held after a requested reboot: %q", msg)
+	}
+	judge("b", "kernel_panic,bug", off)
+	if msg := h.message(on); msg != "" {
+		t.Fatalf("held although calibration was off at the restart: %q", msg)
+	}
+	judge("c", "watchdog_apps_bark", on)
+	if msg := h.message(on); !strings.Contains(msg, "watchdog_apps_bark") {
+		t.Fatalf("not held after a watchdog restart: %q", msg)
+	}
+	// It outlasts an ordinary reboot: only the owner ends it.
+	judge("d", "reboot,userrequested", on)
+	if h.message(on) == "" {
+		t.Fatal("a reboot ended the hold")
+	}
+	if h.message(off) != "" || h.message(on) != "" {
+		t.Fatal("switching off and on did not end the hold")
+	}
+	// The service starting again in the boot that tripped must not put it back.
+	judge("e", "watchdog_apps_bark", on)
+	if h.message(off) != "" {
+		t.Fatal("held for a choice of off")
+	}
+	judge("e", "watchdog_apps_bark", on)
+	if msg := h.message(on); msg != "" {
+		t.Fatalf("judged the same boot twice: %q", msg)
+	}
+}
+
+func TestHeldCalibrationReturnsToFactoryTimingAndSaysWhy(t *testing.T) {
+	var calls []string
+	var last status
+	m := monitor{publish: func(s status) { last = s }, run: func(arg string) (int, string) {
+		calls = append(calls, arg)
+		return 0, ""
+	}, held: "why"}
+	on := preference{true, "60"}
+	now := time.Unix(12345, 0)
+	m.reconcile(on, true, true, now) // a receipt from before the restart is still there
+	if !reflect.DeepEqual(calls, []string{"stock"}) || last != (status{on, "error", "why"}) {
+		t.Fatalf("calls %v, status %+v", calls, last)
+	}
+	m.reconcile(on, true, false, now.Add(time.Second))
+	if len(calls) != 1 || last != (status{on, "error", "why"}) {
+		t.Fatalf("calls %v, status %+v", calls, last)
+	}
+	m.held = ""
+	m.reconcile(on, true, false, now.Add(2*time.Second))
+	if !reflect.DeepEqual(calls, []string{"stock", "apply60"}) || last.State != "active" {
+		t.Fatalf("calls %v, status %+v", calls, last)
 	}
 }

@@ -57,7 +57,7 @@ holds calibrated timing); a fresh device takes the zip. To install the zip
 from a computer exactly as the Magisk app would:
 
 ```sh
-adb push build/astra-0.4.zip /data/local/tmp/ && adb shell su -c 'magisk --install-module /data/local/tmp/astra-0.4.zip'
+adb push build/astra-0.4.1.zip /data/local/tmp/ && adb shell su -c 'magisk --install-module /data/local/tmp/astra-0.4.1.zip'
 ```
 
 On the tablet:

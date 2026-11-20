@@ -13,7 +13,8 @@
 //     for either. The control law's floor goes to the cluster the game's
 //     busiest thread runs on; the other cluster gets only what its own busiest
 //     game thread needs for the same headroom, so six idle cores are not held
-//     at a high clock because two busy ones need it.
+//     at a high clock because two busy ones need it (though never below
+//     -base: see governor.sideFloor).
 //
 // With -heat it also keeps the tablet under the vendor's thermal cut in Rise
 // (heat.go), by giving up GPU floor and then CPU ceiling a little at a time.
@@ -22,6 +23,7 @@
 // holds the performance cores' minimum clock a little above the vendor's
 // while the screen is on (see governor.rest). No frames are watched and no
 // app is singled out; the control law stays behind the vendor's game scene.
+// The same clock is those cores' least in a game.
 //
 // Everything it writes is runtime sysfs state that disappears on reboot.
 // The vendor's thermal limits are untouched: a floor never goes above the
@@ -407,7 +409,7 @@ type governor struct {
 	fanWas  int                // the fan level found before our first write in this game, 0 if we have not written
 	fanOurs int                // the level we last wrote
 	hold    []int              // for experiments: floors in MHz (prime cores, GPU, other cores) to hold in games instead of running the control law
-	base    int                // the performance cores' minimum outside games while the screen is on, kHz; 0 leaves it to the vendor
+	base    int                // the performance cores' minimum outside games while the screen is on, and in games whose busiest thread is on the prime cores, kHz; 0 leaves it to the vendor
 	rested  bool               // that minimum is in place and it was this instance that put it there
 }
 
@@ -500,12 +502,26 @@ func (g *governor) reached(policy string) int {
 // thread would be as busy as the busiest thread is at its floor. The ratio is
 // the largest of the last ten seconds, so a thread that comes and goes keeps
 // its clock.
+//
+// The six performance cores never get less than -base, the minimum they have
+// outside games. With every heavy thread of a game on the two prime cores (the
+// vendor's Rise packs them there) the ratio says the other six need nothing,
+// and entering the game used to drop them from -base to 384 MHz. But each
+// frame still waits for short work there that belongs to no heavy thread, and
+// the stock governor leaves 384 MHz too slowly for it: Shadow of the Colossus
+// in Rise skipped a frame every eight seconds until those cores were held at
+// 1152 MHz. Unlike the control law's floor this one gets no answer from late
+// frames, so it has a bottom instead.
 func (g *governor) sideFloor(policy string, hotMHz int) int {
 	ratio := 0.0
 	for _, r := range g.side {
 		ratio = max(ratio, r)
 	}
-	return g.cpuFloorKHz(policy, int(float64(hotMHz)*min(ratio, 1)))
+	khz := g.cpuFloorKHz(policy, int(float64(hotMHz)*min(ratio, 1)))
+	if policy == policies[0] {
+		khz = max(khz, g.base)
+	}
+	return khz
 }
 
 // leaveGame hands the floors and IFAS parameters back. Each floor goes back to
@@ -979,7 +995,7 @@ func main() {
 	hold := flag.String("hold", "", "for experiments: hold these floors in games (\"cpuMHz,gpuMHz[,otherCoresMHz]\": the first is for the prime cores, and for the rest unless a third is given) instead of running the control law")
 	fanMin := flag.Int("fan", 0, "the slowest fan level to allow in games, 1-5 (the vendor runs 2 until the tablet is hot); 0 leaves the fan to the vendor")
 	heatC := flag.Float64("heat", 0, "in Rise, hold the board sensor (xo-therm) at or under this many C by giving up spare GPU floor and then CPU ceilings a step at a time; the vendor cuts the ceilings hard at 49. 0 leaves both alone")
-	base := flag.Int("base", 0, "outside games, hold the six performance cores' minimum at this many MHz while the screen is on (the vendor's is 384); 0 leaves it alone")
+	base := flag.Int("base", 0, "hold the six performance cores' minimum at this many MHz (the vendor's is 384) outside games while the screen is on, and in games whose busiest thread runs on the two prime cores; 0 leaves it alone")
 	fanHot := flag.Bool("fanhot", false, "run the fan at its top level while clocks are being cut for heat, or the board is within four degrees of the vendor's first cut; only ever faster than the vendor has it, and never when it is switched off")
 	statePath := flag.String("state", "", "remember /enable and /disable in this file, so a restart or a reboot keeps the choice; without it every start is enabled")
 	thrifty := flag.Bool("thrifty", false, "give up GPU floor the GPU's busy share does not call for at any temperature, not only near -heat's target (content at the panel's rate whose CPU floor stays at its limit; see sample.thrifty)")

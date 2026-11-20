@@ -209,6 +209,8 @@ func serve(ctx context.Context, moddir string, s *state) {
 		m.paused = "Previous controller access was interrupted. Calibration paused until the next full sleep and wake."
 	}
 	ok := supported()
+	hold := restartHold{stateDir}
+	judged := false
 	tick := time.NewTimer(0)
 	<-tick.C
 	defer tick.Stop()
@@ -239,13 +241,24 @@ func serve(ctx context.Context, moddir string, s *state) {
 			err = nil
 		}
 		owns := has(receipt)
+		if err == nil && !disabled {
+			if !judged {
+				id, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
+				if jerr := hold.judge(strings.TrimSpace(string(id)), prop("sys.boot.reason"), p); jerr != nil {
+					log.Printf("could not record how this boot began: %v", jerr)
+				}
+				judged = true
+			}
+			m.held = hold.message(p)
+		}
+		want := p.Enabled && m.held == ""
 		if err != nil {
 			m.verified = false
 			m.report(m.last, "error", err.Error())
-		} else if !ok && (p.Enabled || owns) {
+		} else if !ok && (want || owns) {
 			m.report(p, "error", "Unsupported tablet or firmware build")
 		} else {
-			need := p.Enabled || owns
+			need := want || owns
 			physical := need && panelAwake()
 			if need && bootDone && !now.Before(nextPowerCheck) && ((physical && (gate.onSince.IsZero() || !now.Before(nextWakeAudit))) || (!physical && m.paused != "")) {
 				power := powerState(ctx)
@@ -285,7 +298,7 @@ func serve(ctx context.Context, moddir string, s *state) {
 		if disabled && (!has(receipt) || !ok) {
 			return
 		}
-		if err == nil && !p.Enabled && !owns {
+		if err == nil && !want && !owns {
 			// Calibration is off and nothing of ours is in the controller:
 			// the only thing to notice is the app switching it on.
 			delay = idlePoll

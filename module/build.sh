@@ -9,9 +9,9 @@ SDK=${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}
 cd "$ROOT"
 mkdir -p build
 go test ./... >/dev/null
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o build/astrad2 .
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -o build/astrad2 .
 (cd panel && go test ./... >/dev/null && python3 test_panel_table.py >/dev/null 2>&1 &&
-  GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o ../build/panel-service .)
+  GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags='-s -w' -o ../build/panel-service .)
 # The helper that asks SurfaceFlinger for a brief mode change, run with app_process.
 CLASSES=$(mktemp -d)
 trap 'rm -rf "$CLASSES"' EXIT

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -75,6 +76,19 @@ type monitor struct {
 	next     time.Time
 	verified bool
 	paused   string
+	// Why calibration is kept off although the owner's choice is on; empty
+	// when it is not. Factory timing is then restored as for a choice of off.
+	held string
+}
+
+// off reports factory timing: as the owner's choice, or as a fault that says
+// why when calibration is being kept off against that choice.
+func (m *monitor) off(p preference) {
+	if m.held != "" {
+		m.report(p, "error", m.held)
+		return
+	}
+	m.report(p, "off", "")
 }
 
 func (m *monitor) report(p preference, state, msg string) {
@@ -149,9 +163,10 @@ func (m *monitor) reconcile(p preference, awake, owns bool, now time.Time) {
 		m.next = time.Time{}
 		m.last = p
 	}
-	if !p.Enabled && !owns {
+	want := p.Enabled && m.held == ""
+	if !want && !owns {
 		m.verified = false
-		m.report(p, "off", "")
+		m.off(p)
 		return
 	}
 	if m.paused != "" {
@@ -166,7 +181,7 @@ func (m *monitor) reconcile(p preference, awake, owns bool, now time.Time) {
 	if now.Before(m.next) {
 		return
 	}
-	if !p.Enabled {
+	if !want {
 		m.report(p, "restoring", "Restoring factory timing")
 		if code, msg := m.run("stock"); code != 0 {
 			m.retry(p, now, msg)
@@ -174,7 +189,7 @@ func (m *monitor) reconcile(p preference, awake, owns bool, now time.Time) {
 		}
 		m.next = time.Time{}
 		m.verified = false
-		m.report(p, "off", "")
+		m.off(p)
 		return
 	}
 	suffix := p.Rate
@@ -193,6 +208,92 @@ func (m *monitor) reconcile(p preference, awake, owns bool, now time.Time) {
 	m.verified = true
 	m.next = time.Time{}
 	m.report(p, "active", "")
+}
+
+// unexpectedRestart reports whether Android's reason for the last boot names a
+// crash. The restarts calibration caused before 0.4 read "kernel_panic,..."
+// and "watchdog_apps_bark". A requested reboot, a shutdown and a cold start do
+// not count, and neither does a reset forced with the power key.
+func unexpectedRestart(reason string) bool {
+	return strings.HasPrefix(reason, "kernel_panic") || strings.HasPrefix(reason, "watchdog")
+}
+
+// restartHold keeps calibration off after the tablet restarted by itself with
+// calibration switched on, until the owner changes the choice in the app.
+//
+// The service cannot tell whether calibration caused a restart, so it assumes
+// the worst once and says so: a fault of ours then costs one restart instead of
+// one at every wake. The hold lives in the service's own directory and
+// survives reboots; the owner's saved choice is never rewritten.
+type restartHold struct {
+	dir string
+}
+
+func (h restartHold) seen() string { return filepath.Join(h.dir, "restart-seen") }
+func (h restartHold) file() string { return filepath.Join(h.dir, "restart-hold") }
+
+func (p preference) record() string {
+	if p.Enabled {
+		return "on " + p.Rate
+	}
+	return "off " + p.Rate
+}
+
+// judge looks at how this boot began, once per boot: a restart of the service
+// must not put back a hold the owner has already cleared.
+func (h restartHold) judge(bootID, reason string, p preference) error {
+	if bootID == "" {
+		return errors.New("no boot ID")
+	}
+	if b, _ := os.ReadFile(h.seen()); strings.TrimSpace(string(b)) == bootID {
+		return nil
+	}
+	if unexpectedRestart(reason) && p.Enabled {
+		// The reason comes from memory that survived a crash and can hold anything.
+		clean := strings.Map(func(r rune) rune {
+			if r < '!' || r > '~' {
+				return -1
+			}
+			return r
+		}, reason)
+		if len(clean) > 40 {
+			clean = clean[:40]
+		}
+		if err := writeSynced(h.file(), p.record()+"\n"+clean+"\n"); err != nil {
+			return err
+		}
+	}
+	return writeSynced(h.seen(), bootID+"\n")
+}
+
+// message is why calibration is held off for this choice, or empty when it is
+// not. Any other choice than the one that was on at the restart ends the hold:
+// switching off and on again in the app, or picking another rate.
+func (h restartHold) message(p preference) string {
+	b, err := os.ReadFile(h.file())
+	if err != nil {
+		return ""
+	}
+	choice, reason, _ := strings.Cut(strings.TrimSpace(string(b)), "\n")
+	if choice != p.record() {
+		os.Remove(h.file())
+		return ""
+	}
+	return "The tablet restarted by itself (" + reason + "), so calibration is off. Switch it off and on to use it again."
+}
+
+func writeSynced(path, text string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err = f.WriteString(text); err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 func helperDiagnostic(output []byte, err error) string {
