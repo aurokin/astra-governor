@@ -74,9 +74,10 @@ its switch, which is remembered across reboots.
 - **Pick Balance or Rise per game, not Diablo.** Balance is enough for most
   emulators, streaming and lighter games. Try Rise for the heaviest games (PS2,
   demanding GameCube and Wii scenes): it keeps more headroom and the vendor's
-  heat limits start later. Not every heavy game gains from it: God of War II
-  and F-Zero GX did, Shadow of the Colossus ran better in Balance. In Diablo
-  the governor stands aside.
+  heat limits start later. God of War II and F-Zero GX gained from it;
+  Shadow of the Colossus is as good in either since 0.4.1. In Diablo the
+  governor stands aside, and some 30 fps games pace worse there than in
+  either governed mode.
 - **Refresh rate per game.** Game Space starts each game at 60 Hz unless you
   change it with the refresh button in the in-game overlay. The governor holds
   120, 144 and 165 Hz games at full rate too.
@@ -112,8 +113,10 @@ The 90, 120, 144 and 165 Hz modes are corrected with any of them.
   During development that tablet restarted while waking twice. The cause was
   found (a calibration packet reaching the panel as it powered down) and
   fixed in 0.4: 170 calibration runs cut short on purpose by switching the
-  screen off gave no restart, where the 18th had before. If your tablet
-  restarts by itself, switch calibration off and see whether it stops;
+  screen off gave no restart, where the 18th had before. If the tablet does
+  restart by itself with calibration on, calibration stays off afterwards and
+  the app says so, until you switch it off and on again (0.4.1). If that
+  happens to you, please report it;
   [docs/display.md](docs/display.md#restarts-on-waking-found-and-fixed) has
   the whole story.
 

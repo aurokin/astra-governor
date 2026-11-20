@@ -60,6 +60,10 @@ from a computer exactly as the Magisk app would:
 adb push build/astra-0.4.1.zip /data/local/tmp/ && adb shell su -c 'magisk --install-module /data/local/tmp/astra-0.4.1.zip'
 ```
 
+`panel-service` takes SIGTERM as the module being switched off: it exits 0
+and `service.sh` does not start it again. After stopping it by hand, start
+`/data/adb/modules/astra/panel-service` by hand or reboot.
+
 On the tablet:
 
 ```sh

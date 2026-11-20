@@ -72,4 +72,12 @@ python3 tools/results.py runs native3
 | `mr2-real1` | 11.0.8MR1, the 0.4 release installed from its zip: the plan of `real2` and `mr1-real1` again |
 | `mr2-ntsc1` | the 0.4 release: Super Mario Galaxy with display calibration on NTSC, vendor and governor |
 | `mr2-panel1` | the 0.4 release: SuperTuxKart at 165 Hz in Rise, vendor and governor (the first `stockrise` run is void: the panel left 165 Hz) |
+| `mr2-sotc-ntsc1` | the 0.4 release, display calibration on NTSC: Shadow of the Colossus in Balance, Rise and Diablo, twice each |
+| `mr2-sotc-ntsc2`, `mr2-sotc-ntsc3` | the same scene in the vendor's Rise with the governor off, the performance cores as they come and held at 2227 MHz; shows nothing either way (the vendor leaves the GPU near 470 MHz and frames are late for that) |
+| `mr2-sotc-ntsc4`, `mr2-sotc-pin1152000`, `mr2-sotc-pin1555200` | the 0.4 release in Rise on NTSC with the performance cores' minimum held by a shell loop at 2227, 1152 and 1555 MHz |
+| `mr2-side1` | the 0.4.1 change as a setting: Shadow of the Colossus in Rise on NTSC with no minimum, 1152 and 1555 MHz, three runs each in turn |
+| `mr3-real1` | the 0.4.1 release installed from its zip: the plan of `real2`, `mr1-real1` and `mr2-real1` again |
+| `mr3-thirty1` | the 0.4.1 release: Xenoblade, Shadow of the Colossus and Wind Waker, 90 s three times each in Balance and Rise |
+| `mr3-panel1` | the 0.4.1 release: SuperTuxKart at 165 Hz in Rise, vendor and governor |
+| `mr3-ntsc1` | the 0.4.1 release, display calibration on NTSC: Super Mario Galaxy, vendor and governor; Shadow of the Colossus in Balance, Rise and Diablo, three times each |
 | `_loadgen_csv` | per-frame logs written by the synthetic load app itself |

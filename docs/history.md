@@ -18,6 +18,7 @@ Dates are 2026.
 | 11-18 | **The panel's timing corrected**: the controller's timing words take effect when followed by two more writes and a mode change. All five modes matched; a service and an app to reapply them after every wake ([display.md](display.md#how-it-was-found)). A restart on waking that evening |
 | 11-19 | GBA and NES choices; the mode change made through SurfaceFlinger instead of the saved setting. Tablet updated to RedMagicOS 11.0.8MR1 keeping root; every rate measured again. A second restart on waking; a matched comparison could not reproduce it. The governor measured again on the new build. **One module, one app**: the governor's switch remembered, calibration off until switched on. That night the restart was reproduced by switching the screen off inside calibration runs, its cause found, and calibration moved to the display driver's locked command path |
 | 11-20 | Frames held too long counted for 30 fps content; everything measured again on the final build. Release 0.4 |
+| 11-20 | Why Shadow of the Colossus paced worse in Rise and Diablo: the panel's rate, and in Rise the six performance cores left at 384 MHz. A minimum for them in games; calibration held off after a restart by itself; everything measured again. Release 0.4.1 |
 
 ## Why the first governor was replaced
 
@@ -38,6 +39,8 @@ Other changes in the same rewrite:
   step down can be predicted for either.
 - **The other cluster** gets only what its own busiest game thread needs, so
   six idle cores are not held at a high clock because two busy ones need it.
+  (Since 0.4.1 the six never get less than their minimum outside games: idle
+  of the game's own threads turned out not to mean idle.)
 
 ## Faults found and fixed
 
@@ -54,6 +57,8 @@ Other changes in the same rewrite:
 | 11-19 | the tablet restarted while waking, twice in two days, with calibration in use: a calibration packet sent through the vendor's unlocked debug nodes met the panel's off command, and the display's interrupt fired without end at the next wake | calibration sends its packets through the display driver's own command files, which the driver locks against a power-down ([display.md](display.md#restarts-on-waking-found-and-fixed)) |
 | 11-19 | that restart left calibration's journal as a file of zeros, and the service refused to run | the journal reaches the disk before it replaces the last; an unreadable one from before a restart is dropped |
 | 11-20 | a 30 fps game left on clocks that made a frame a second late, because the next frame made up for it and no rate dipped (Xenoblade in Rise, 61-70% clean in two runs of three) | count frames held a refresh too long, beyond the panel's own (`heldLate`) |
+| 11-20 | in Rise, with a game's heavy threads all on the two prime cores, the six performance cores fell to 384 MHz, under their minimum outside games, and Shadow of the Colossus skipped 3-19 frames in 90 s (73-78% clean) | they keep that minimum, 1152 MHz, in games ([results](results.md#games-on-the-prime-cores-in-rise-041)) |
+| 11-20 | nothing limited the cost of being wrong about the restart fix: a tablet that still restarted with calibration on would do so again at a later wake | after a restart Android puts down to a kernel panic or a watchdog, calibration stays off until switched on again ([display.md](display.md#what-keeps-it-safe)) |
 
 ## Tried and not adopted
 
@@ -95,11 +100,19 @@ Other changes in the same rewrite:
 
 ## Open problems
 
-- **Shadow of the Colossus is better in Balance than in Rise or Diablo**
-  (93-99% clean against 67-88% and 65-67%), the opposite of the advice for
-  heavy PS2 games. Why higher clocks cost it frames is not known; a law that
-  noticed would have to learn that a lower setting paces a game better
-  ([results](results.md#30-fps-games-late-frames-the-rate-does-not-show)).
+- **A 29.97 fps game in Diablo crosses the panel's refresh badly.** On the
+  factory panel Shadow of the Colossus is 59-67% clean in Diablo against
+  92-99% under the governor: each time the game's frames slide past a refresh
+  (every three seconds) Diablo shows a burst of late and early frames where
+  the governed modes show one late frame. With the panel on NTSC it is 100%
+  in three runs of five, but once the frames fell on the edge of a refresh
+  and stayed there for the whole run (7%). Why Diablo's frames sit where they
+  can flip is not known, and Diablo is outside what the governor does
+  ([results](results.md#an-emulator-on-the-ntsc-choice)).
+- **What a frame waits for on the performance cores** when a game's heavy
+  threads are all on the prime cores was not found; 0.4.1 holds those cores
+  at 1152 MHz without knowing which thread needs it, on the evidence of one
+  game.
 - **No readout over a game.** The app shows what the governor is doing only
   while the app is in front, or beside a game in split screen. The first
   governor's app had an overlay; it was not carried over.

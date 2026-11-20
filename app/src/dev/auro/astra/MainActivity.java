@@ -36,7 +36,7 @@ import dev.auro.astra.CalibrationStore.Preset;
 public final class MainActivity extends Activity {
     private static final ExecutorService IO = Executors.newSingleThreadExecutor();
     private static final String EXPERIMENTAL = "Experimental: a few days old and proven on one tablet. "
-            + "If yours restarts by itself, switch this off.";
+            + "After a restart by itself it stays off until you switch it off and on.";
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Runnable poll = this::fetch;

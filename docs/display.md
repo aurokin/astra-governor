@@ -165,6 +165,15 @@ is built around not repeating them:
   on again.
 - **After any error it stops** until the next full sleep and wake, rather
   than retrying against a display link that may be unwell.
+- **After a restart by itself it stays off** (0.4.1). When Android's reason
+  for the last boot is a kernel panic or a watchdog and calibration was
+  switched on, the service leaves the panel at factory timing and the app
+  says why, until calibration is switched off and on again or another rate
+  is chosen. The service cannot tell whether calibration caused the restart;
+  it assumes so once, so that a fault of its own costs one restart and not
+  one at every wake. The two restarts calibration did cause read
+  `kernel_panic` and `watchdog_apps_bark`. A reset forced with the power key
+  reads as neither and does not trip it.
 - **Four-byte reads only**, and only the registers named above.
 
 ## Measured and not measured
@@ -191,12 +200,25 @@ Measured, on both firmware builds unless noted:
   error. Fifteen had a packet requested within 2 ms of the panel's off
   command; twenty packets arrived after the link was off and were refused by
   the driver. A wake left alone afterwards ended **Calibrated** at 60.000 Hz.
+- **The hold after a restart by itself** (0.4.1, 11.0.8MR1), with the boot
+  reason set to `watchdog_apps_bark` by hand and calibration on: the service
+  started in **error** with the reason in its message and sent nothing to the
+  panel; stopped and started again in the same boot it still held; switched
+  off it read **Factory timing**; switched on again it calibrated, and
+  another start of the service in that boot did not hold it a second time.
+  A real panic or watchdog restart was not provoked for it.
 - **A 59.94 fps emulator on NTSC** (11.0.8MR1, campaign `mr1-ntsc1`): Super
   Mario Galaxy's heavy scene under the governor for two minutes showed 7,470
   frames for one refresh each and 2 for two. On factory timing the same scene
   repeats a frame every three seconds whatever the clocks do: 22 in 67
   seconds in `mr1-real1`. Android's present times put the panel at 59.940 Hz
   during the run.
+- **A 29.97 fps emulator on NTSC** (0.4 and 0.4.1; `mr2-sotc-ntsc1`,
+  `mr3-ntsc1`): Shadow of the Colossus under the governor, every second
+  clean five times of five in Balance and 98-100% in Rise, against 92-99%
+  on factory timing. In Diablo three runs of five were clean throughout and
+  one had its frames on the edge of a refresh from start to end, 7%
+  ([results](results.md#an-emulator-on-the-ntsc-choice)).
 - **Through the app, on the first 0.4 zip** (the vendor's nodes): on, Modern,
   NTSC, a sleep and wake, and off again, with the app's own meter reading
   60.27, 60.00, 59.94 and 60.27 Hz and no display-link error in the kernel
@@ -290,8 +312,11 @@ hand. Fixed as described under [what keeps it safe](#what-keeps-it-safe).
 What this does not show: that these two restarts are the only way the
 tablet can restart on waking (an owner of another Astra has reported
 spontaneous restarts on stock firmware), or how calibration holds up over
-weeks. If a tablet restarts by itself with calibration on, switch it off and
-see whether it stops.
+weeks. For that reason the service from 0.4.1 keeps calibration off after
+any restart Android puts down to a kernel panic or a watchdog, until it is
+switched on again ([what keeps it safe](#what-keeps-it-safe)). If a tablet
+goes on restarting by itself with calibration off, calibration was not the
+cause.
 
 ## Hazards
 

@@ -164,6 +164,18 @@ the cores idle near 570 MHz, and about once a second a frame is not ready: a
 60 fps clip played at 58.7-58.9 fps, and at 59.8 with the minimum. No power
 cost could be measured. The daemon only takes back a minimum it raised itself.
 
+**The same clock is those cores' least in a game** (0.4.1). The control law's
+CPU minimum goes to the cluster the game's busiest thread runs on, and the
+other cluster gets what the game's own threads there call for. When the
+vendor's Rise packs every heavy thread onto the two prime cores, that is
+nothing, and the six performance cores used to drop to 384 MHz on entering
+the game. Each frame still waits for short work on them that belongs to no
+heavy thread. Shadow of the Colossus in Rise skipped a frame every eight
+seconds or so until they were held up, and none at 1152 MHz, for no power
+that could be measured ([results](results.md#games-on-the-prime-cores-in-rise-041)).
+This minimum gets no answer from late frames as the law's own does, which is
+why it is a fixed bottom and not something the law works down.
+
 ## Fan (`-fan`, `-fanhot`, both unused)
 
 `-fan N` sets a slowest fan level for games; `-fanhot` runs the fan at its top

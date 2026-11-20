@@ -8,8 +8,8 @@ prints them. How the numbers are made is in
 
 **Which firmware.** Every section but the last was measured on RedMagicOS
 11.0.7; [RedMagicOS 11.0.8MR1](#redmagicos-1108mr1) repeats the main
-comparisons on that build with the 0.4 release and finds them unchanged
-but for 30 fps games in Rise, which 0.4 improves.
+comparisons on that build with the 0.4 and 0.4.1 releases and finds them
+unchanged but for 30 fps games in Rise, which those two improve.
 
 **Reading the numbers.** *Clean* is the share of seconds with no late frame
 beyond what the panel itself forces. *Late frames* are extra one-refresh delays
@@ -243,26 +243,34 @@ and the governor measured again, twice:
   its zip, which adds the [count of frames held too
   long](control-law.md#when-a-frame-is-late) for 30 fps content. 82 runs on
   one boot; one run that did not start was repeated.
+- `mr3-real1` (11-20): the plan once more on the 0.4.1 build, installed from
+  its zip, which adds [a minimum for the performance cores in
+  games](#games-on-the-prime-cores-in-rise-041). 82 runs on one boot; one
+  scene that did not start was repeated.
 
 Display calibration was off except where it says otherwise.
 
-**The 0.3 results hold on 11.0.8MR1, and 0.4 changes one of them on
-purpose.** Scene for scene the three campaigns are within the spread between
-two runs, except Xenoblade in Rise, below.
+**The 0.3 results hold on 11.0.8MR1; 0.4 and 0.4.1 each change one of them
+on purpose.** Scene for scene the four campaigns are within the spread
+between two runs, except Xenoblade in Rise (0.4) and Shadow of the Colossus
+in Rise (0.4.1), below.
 
-| | 11.0.7, 0.3 (`real2`) | 11.0.8MR1, 0.3's law (`mr1-real1`) | 11.0.8MR1, 0.4 (`mr2-real1`) |
-| --- | --- | --- | --- |
-| Emulator scenes below 90% clean, vendor in Balance | 7 of 16 | 6 of 16 | 7 of 16 |
-| Emulator scenes at 88% clean or better, governor in Balance | 15 of 16 | 15 of 16 | 15 of 16 |
-| The same, governor in Rise | | 14 of 16 | 15 of 16 |
-| Mario Galaxy, heavy scene: vendor, governor, Diablo | 71% speed 3.7 W, 100% 4.5 W, 100% 7.5 W | 73% speed 3.7 W, 100% 4.3 W, 100% 7.2 W | 73% speed 3.8 W, 100% 4.5 W, 100% 8.2 W |
-| 60 fps video outside games: vendor, governor | 58.8 fps, 59.8 fps | 58.7 fps, 59.8 fps | 58.8 fps, 59.8 fps |
-| Power over the sixteen emulator scenes: vendor, governor in Balance, in Rise | | 59.5, 67.8, 73.1 W | 60.7, 68.2, 75.7 W |
+| | 11.0.7, 0.3 (`real2`) | 11.0.8MR1, 0.3's law (`mr1-real1`) | 11.0.8MR1, 0.4 (`mr2-real1`) | 11.0.8MR1, 0.4.1 (`mr3-real1`) |
+| --- | --- | --- | --- | --- |
+| Emulator scenes below 90% clean, vendor in Balance | 7 of 16 | 6 of 16 | 7 of 16 | 6 of 16 |
+| Emulator scenes at 88% clean or better, governor in Balance | 15 of 16 | 15 of 16 | 15 of 16 | 15 of 16 |
+| The same, governor in Rise | | 14 of 16 | 15 of 16 | 15 of 16 |
+| Mario Galaxy, heavy scene: vendor, governor, Diablo | 71% speed 3.7 W, 100% 4.5 W, 100% 7.5 W | 73% speed 3.7 W, 100% 4.3 W, 100% 7.2 W | 73% speed 3.8 W, 100% 4.5 W, 100% 8.2 W | 73% speed 3.6 W, 100% 4.2 W, 100% 7.5 W |
+| 60 fps video outside games: vendor, governor | 58.8 fps, 59.8 fps | 58.7 fps, 59.8 fps | 58.8 fps, 59.8 fps | 59.0 fps, 59.9 fps |
+| Power over the sixteen emulator scenes: vendor, governor in Balance, in Rise | | 59.5, 67.8, 73.1 W | 60.7, 68.2, 75.7 W | 60.1, 68.0, 73.7 W |
 
 The scene left below 88% in Balance is F-Zero GX's attract loop each time
-(86-87%, as in Diablo's 91-92% it never reaches full speed). The one left in
-Rise in 0.4 is Shadow of the Colossus, below. Diablo over the sixteen:
-114.8 W and 116.7 W.
+(86-88%, as in Diablo's 91-92% it never reaches full speed). The one left in
+Rise in 0.4 is Shadow of the Colossus, below. In 0.4.1 it is Xenoblade, at
+87.9% in that one-minute pass (89% in Balance); three 90 s runs of it in
+each mode straight afterwards gave 97-99% and 99-100% (`mr3-thirty1`), so
+this is the spread of a one-minute run and not a change. Diablo over the
+sixteen: 114.8 W, 116.7 W and 115.8 W.
 
 0.4, scene by scene (`mr2-real1`):
 
@@ -317,26 +325,86 @@ mode, the governor left running throughout.
 - **Xenoblade**: in the first run the governor went to 222 MHz, counted the
   frames held too long within a few seconds, went back and stayed at 525 MHz
   for the five runs that followed.
-- **Shadow of the Colossus is worse at high clocks, and 0.4 does not change
-  that.** Diablo gives 65-67%, the governor in Rise 67-88% with 5-13 frames a
-  minute held two refreshes too long, Balance 93-99% with none; on 11.0.7
-  the governed Rise runs ranged 78-97%. In Rise the governor spends these
-  runs at ample clocks, where the game is uneven by itself and nothing is
-  held against the clocks. Why higher clocks cost this game frames is not
-  known. For it Balance is the better mode, at 3 W less.
+- **Shadow of the Colossus was worse in Rise and in Diablo, and 0.4 did not
+  change that.** Diablo gave 65-67%, the governor in Rise 67-88% with 5-13
+  frames a minute held two refreshes too long, Balance 93-99% with none; on
+  11.0.7 the governed Rise runs ranged 78-97%. Two causes were found
+  afterwards, neither of them the clocks: [the performance cores' minimum in
+  Rise](#games-on-the-prime-cores-in-rise-041), put right in 0.4.1, and the
+  panel's rate, which is what is left in Diablo
+  ([below](#an-emulator-on-the-ntsc-choice)).
 - Seven minutes of Xenoblade in Balance from a fresh launch under 0.3's law
   (`mr1-xeno-long`) held 96% clean, minute by minute 100, 85, 100, 98, 95,
   100 and 93%, at 5.0 W.
 
+### Games on the prime cores in Rise (0.4.1)
+
+The vendor's Rise puts a heavy game's threads on the two prime cores. The
+governor's CPU minimum follows them there, and the six performance cores got
+only what the game's own threads on them called for: nothing, so 384 MHz,
+under the 1152 MHz they are held at outside games. Shadow of the Colossus
+then skipped frames: the emulator finished one 55-61 ms after the last and a
+frame was shown for four refreshes instead of two, 3-19 times in 90 s
+(`mr2-thirty1`, `mr2-real1`), with the GPU at its top clock, the prime cores
+at 3.8-4.3 GHz and the hottest core at 104 C. It showed once the game's other
+trouble, the panel's rate, was taken away
+([below](#an-emulator-on-the-ntsc-choice)): Diablo, which holds the six cores
+at 3.5 GHz and is as hot, was then perfect and Rise still skipped.
+
+With the panel on NTSC, 90 s runs:
+
+| Performance cores' minimum in Rise | Skipped frames per run | Clean | Power |
+| --- | --- | --- | --- |
+| 0.4 as released: 384-750 MHz (`mr2-sotc-ntsc1`) | 11, 11 | 89, 89% | 10.0, 10.9 W |
+| 0.4, held by hand at 1152 MHz (`mr2-sotc-pin1152000`) | 0, 0 | 99, 99% | 10.0, 9.8 W |
+| 0.4, held at 1555 MHz (`mr2-sotc-pin1555200`) | 0, 0 | 99, 100% | 10.6, 10.0 W |
+| 0.4, held at 2227 MHz (`mr2-sotc-ntsc4`) | 0, 0 | 100, 100% | 10.5, 10.6 W |
+| The new build with no minimum (`mr2-side1`) | 1, 12, 5 | 99, 88, 94% | 10.5, 10.8, 10.2 W |
+| The new build, 1152 MHz (`mr2-side1`) | 0, 0, 0 | 99, 100, 100% | 10.2, 10.3, 10.5 W |
+| The new build, 1555 MHz (`mr2-side1`) | 0, 0, 0 | 100, 100, 100% | 10.6, 10.4, 10.5 W |
+
+The last three rows are one build with the minimum as a setting, the nine
+runs taken in turn. 1152 MHz is what the cores already have outside games,
+so 0.4.1 uses that: entering a game no longer lowers it.
+
+On the factory panel, 0.4.1 as installed, three 90 s runs (`mr3-thirty1`) and
+the one-minute pass of `mr3-real1`, against the same four for 0.4:
+
+| Shadow of the Colossus | 0.4 | 0.4.1 |
+| --- | --- | --- |
+| Governor, Rise | 73, 78, 76 and 74% clean; 3-19 skipped frames a run; 10.5-10.7 W | 98, 92, 94 and 94%; none skipped; 10.0-10.1 W |
+| Governor, Balance | 93, 98, 99 and 96%; 6.9-8.2 W | 94, 93, 97 and 96%; 7.8-8.3 W |
+
+- **The other scenes whose performance cores sat under 1152 MHz in 0.4's
+  Rise are unchanged**: God of War II 98% at 8.5 W (98%, 8.7 W), Mario Kart
+  DS 100% at 3.4 W (3.3 W), SuperTuxKart at 165 Hz 100% at 10.4 W (10.5 W).
+- **Xenoblade and Wind Waker in Rise do not go through the change** (their
+  minimum there was already higher) and held 99, 99, 97% each. They drew
+  more than in `mr2-thirty1`, 7.7-8.1 W and 4.5-5.8 W against 5.4-7.3 W and
+  3.9-4.1 W: the governor spent these runs at ample clocks (`uneven`, late at
+  the top and held against nothing), where last time an earlier probe had
+  already brought it down. That is the law's known cost for [content late at
+  ample clocks](history.md#open-problems), not this change.
+- **What a frame waits for on those six cores was not found.** The
+  emulator's three heavy threads were on the prime cores throughout.
+
 ### 165 Hz and the vendor's refresh setting
 
 SuperTuxKart at 165 Hz in Rise for five minutes, `mr1-panel1` and, on the
-0.4 release, `mr2-panel1`:
+0.4 and 0.4.1 releases, `mr2-panel1` and `mr3-panel1`:
 
 | | Vendor | Governor |
 | --- | --- | --- |
 | 0.3's law | 164.3 fps, 75% clean, 1.79 late frames a second, 7.9 W | 166.05 fps, every second clean, 8.1 W |
 | 0.4 | 164.5 fps, 69% clean, 1.54 late frames a second, 8.1 W | 166.06 fps, every second clean, 8.4 W |
+| 0.4.1 | 163.7 fps, 70% clean, 2.35 late frames a second, 7.9 W | 166.04 fps, 99.3% clean, 9.6 W |
+
+The governed 0.4.1 run drew 1.2 W more than 0.4's, with the GPU at 801 MHz
+on average against 540 and the performance cores at 1251 MHz against 990.
+The game's threads are on the prime cores here, so the new minimum is in
+play; the other SuperTuxKart scene at 165 Hz in Rise drew 10.4 W against
+10.5 W with it. One run each: how much of the 1.2 W is the minimum and how
+much is where the governor happened to settle was not separated.
 
 One run in each campaign is void and was repeated: the panel left 165 Hz
 under the running game (to 60 Hz 95 seconds into a governed run the first
@@ -349,19 +417,46 @@ the system's refresh setting acting by itself, seen on 11.0.7 as well
 
 Super Mario Galaxy's heavy scene for two minutes with display calibration on
 NTSC, the panel at 59.940 Hz by Android's present times: `mr1-ntsc1`, and
-`mr2-ntsc1` on the 0.4 release with calibration going through the display
-driver's command files.
+`mr2-ntsc1` and `mr3-ntsc1` on the 0.4 and 0.4.1 releases with calibration
+going through the display driver's command files.
 
 | | Speed | Frames shown for one refresh | For two |
 | --- | --- | --- | --- |
-| Vendor, Balance | 73%, 73% | 3,428; 3,377 | 2,023; 2,041 |
-| Governor, Balance | 100%, 100% | 7,470; 7,764 | 2; 2 |
+| Vendor, Balance | 73%, 73%, 73% | 3,428; 3,377; 3,471 | 2,023; 2,041; 2,036 |
+| Governor, Balance | 100%, 100%, 100% | 7,470; 7,764; 7,393 | 2; 2; 4 |
 | Governor, Balance, factory timing (`mr1-real1`, 67 s) | 100% | 4,012 | 22 |
 
 With the governor keeping the game on time and the panel at the game's own
-rate, two frames in two minutes were shown twice, both times. On the factory
-panel the same governed scene shows one twice every three seconds, which no
-clock setting can remove.
+rate, two to four frames in two minutes were shown twice, three times of
+three. On the factory panel the same governed scene shows one twice every
+three seconds, which no clock setting can remove.
+
+**A 29.97 fps game.** Shadow of the Colossus in 90 s runs, `mr2-sotc-ntsc1`
+and `mr3-ntsc1`:
+
+| | Factory panel | Panel on NTSC |
+| --- | --- | --- |
+| Governor, Balance | 93-99% clean | 100% five times of five; in three, every frame shown for exactly two refreshes |
+| Governor, Rise (0.4.1) | 92-98% | 100, 98, 100% |
+| Diablo | 59-67% | 100, 100, 7, 94, 100% |
+
+On the factory panel the game's 29.97 frames a second and the panel's 30.136
+pairs of refreshes slide past each other once every three seconds. Under the
+governor that costs one frame held a refresh longer. In Diablo each crossing
+is a burst of frames held three refreshes and one by turns (110 and 90 of
+them in 97 s), which is what its 59-67% is made of.
+
+With the rates matched there is no crossing, and the frames stay wherever
+they fell when the scene started. In Diablo they twice fell on the edge of a
+refresh: once for the first ten seconds of a run, and once for all of one
+(491 frames held one refresh and 492 held three, where every other frame of
+2,910 should have been two; the emulator's frames were finished 17.7 ms
+before they were shown, against 23.6 and 30.6 ms in the runs that held).
+Under the governor, in Balance or Rise, 25 runs on NTSC had 0 to 31 such
+frames each, 3 in the middle one. So matching the panel takes away Diablo's
+regular trouble with this game and leaves an occasional worse one. Why
+Diablo's frames sit where they can flip and the governed modes' do not was
+not looked into.
 
 ## Not measured
 

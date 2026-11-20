@@ -112,7 +112,8 @@ Every half second, while a game scene is active:
    on suspicion. [Control law](control-law.md) has the whole of it.
 3. **Apply.** Write the minimums that changed. The CPU minimum goes to the
    cluster the busiest thread runs on; the other cluster gets what its own
-   busiest game thread needs for the same headroom.
+   busiest game thread needs for the same headroom, and the six performance
+   cores never less than the 1152 MHz they have outside games.
 
 ## Safety and hand-back
 
