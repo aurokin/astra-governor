@@ -185,7 +185,8 @@ says.
 Any change to how `panel-table.sh` reaches the controller, or to when the
 service runs it, has to survive the screen going off in the middle of a run:
 that is what [restarted the tablet](display.md#restarts-on-waking-found-and-fixed)
-before 0.4, and it took the 18th cut-short run to show.
+before 0.4, and it took the 18th cut-short run to show. Against the fix,
+2,169 such runs have shown nothing ([display.md](display.md#restarts-on-waking-found-and-fixed)).
 
 ```sh
 adb push panel/interrupt-test.sh /data/local/tmp/

@@ -109,11 +109,13 @@ The 90, 120, 144 and 165 Hz modes are corrected with any of them.
   overlay.
 - **To go back**, switch it off with the screen on and wait for **Factory
   timing**. A reboot with it off also does it; nothing is stored in the panel.
-- **Why it is experimental.** It is four days old and has run on one tablet.
+- **Why it is experimental.** It is five days old and has run on one tablet.
   During development that tablet restarted while waking twice. The cause was
   found (a calibration packet reaching the panel as it powered down) and
-  fixed in 0.4: 170 calibration runs cut short on purpose by switching the
-  screen off gave no restart, where the 18th had before. If the tablet does
+  fixed in 0.4: some 2,170 calibration runs cut short on purpose by switching
+  the screen off, 88 of them with a packet inside a millisecond of the
+  panel's power-down, gave no restart, where the 18th had before. What that
+  cannot show is other tablets, or months of ordinary use. If the tablet does
   restart by itself with calibration on, calibration stays off afterwards and
   the app says so, until you switch it off and on again (0.4.1). If that
   happens to you, please report it;

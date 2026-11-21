@@ -195,11 +195,15 @@ Measured, on both firmware builds unless noted:
   Game Space, system setting on Auto): 165 Hz held, 164.998 Hz at the pin.
 - **An interrupted run**: with the guard file left in place, the service
   stayed paused through a boot and resumed after one sleep and wake.
-- **170 runs cut short on purpose** by switching the screen off at a random
-  moment inside them (11.0.8MR1, 2026-11-19): no restart and no display-link
-  error. Fifteen had a packet requested within 2 ms of the panel's off
-  command; twenty packets arrived after the link was off and were refused by
-  the driver. A wake left alone afterwards ended **Calibrated** at 60.000 Hz.
+- **2,169 runs cut short on purpose** by switching the screen off at a
+  random moment inside them: 170 on 2026-11-19 and 1,999 overnight on
+  2026-11-20 with the 0.4.1 release (11.0.8MR1, one boot of nine hours). No
+  restart, and no display-link, storage or interrupt fault in the kernel
+  log. 88 of them had a packet requested within a millisecond of the panel's
+  off command, 160 within two; 201 packets arrived after the link was off
+  and were refused by the driver. A wake left alone after each test ended
+  **Calibrated** at 60.000 Hz, and switching off gave factory timing back
+  ([the comparison](#restarts-on-waking-found-and-fixed)).
 - **The hold after a restart by itself** (0.4.1, 11.0.8MR1), with the boot
   reason set to `watchdog_apps_bark` by hand and calibration on: the service
   started in **error** with the reason in its message and sent nothing to the
@@ -237,7 +241,7 @@ Not measured:
 - **The GBA and NES choices with an emulator**, and the NTSC one with any
   game but the one above.
 - **Battery cost**, which should be nil: nothing runs once the words are in.
-- **Weeks of use.** Everything above is from four days, on one tablet.
+- **Weeks of use.** Everything above is from five days, on one tablet.
 - **The rates at the pin with the changed transfer path.** The ten words are
   the ones measured there; what was checked after the change is that they
   read back and that Android's own measure of the refresh period goes to
@@ -291,18 +295,33 @@ longer initialised. Read from the driver's code and checked on the tablet:
 with the screen off a write is refused and a read returns an error, with
 nothing else in the kernel log.
 
-**The same test against the fix.** 170 helper runs cut short the same way:
-eight with a packet requested within a millisecond of the off command (the
-closest 0.38 ms before it), fifteen within two; no restart, no display-link
-error. In the first test one of the two packets that close was followed by
-the hang.
+**The same test against the fix.** 170 helper runs cut short the same way
+that evening, and 1,999 more overnight on the 0.4.1 release
+(`panel/interrupt-test.sh 2000 10`, nine hours on one boot): no restart, no
+display-link error. In the first test one of the two packets within a
+millisecond of the off command was followed by the hang; against the fix 88
+packets came that close, the closest 4 microseconds before the off command
+and 70 after it.
 
-| | Vendor's nodes (before 0.4) | Driver's command files (0.4) |
-| --- | --- | --- |
-| Helper runs cut short | 18 | 170 |
-| A packet within 1 ms of the off command | 2 | 8 |
-| Packets refused because the link was off | none | 20 |
-| Restarts | 1 | 0 |
+| | Vendor's nodes (before 0.4) | Driver's command files (0.4), 11-19 | The same, 0.4.1, overnight 11-20 |
+| --- | --- | --- | --- |
+| Helper runs cut short | 18 | 170 | 1,999 |
+| A packet within 1 ms of the off command | 2 | 8 | 80 (52 before it, 28 after) |
+| Within 2 ms | 2 | 15 | 145 |
+| Packets refused because the link was off | none | 20 | 181 |
+| Display-link, storage or interrupt faults in the kernel log | the hang | none | none |
+| Restarts | 1 | 0 | 0 |
+
+The kernel logged one warning that night, at 5.9 hours: the vendor's
+scheduler objecting as the GPU driver's message thread woke another thread
+(`android_rvh_try_to_wake_up` in `sched_walt`, called from `msm_kgsl`).
+Nothing followed it and the test went on for three more hours. A calibration
+run was in progress at that moment, as one was for about a quarter of the
+night, and no display code is in the warning's call chain; it was not in the
+kernel logs of the two earlier tests. What caused it is not known.
+
+After each cut-short run the service reported the interruption, waited for
+the next wake and started again, 1,999 times.
 
 A second fault showed up with the restart: the journal was replaced by
 renaming a file that had not reached the disk, the restart left it as 362
